@@ -1,0 +1,81 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Agent {
+  id            String   @id @default(cuid())
+  wallet        String   @unique
+  pda           String   @unique
+  owner         String
+  metadataUri   String
+  registeredAt  DateTime
+  isVerified    Boolean  @default(false)
+  verifiedAt    DateTime?
+  
+  // Extended metadata (cached from AgentCard)
+  name          String?
+  description   String?
+  twitter       String?
+  website       String?
+  
+  // Service endpoints
+  mcpEndpoint   String?
+  a2aEndpoint   String?
+  x402Wallet    String?
+  serviceTypes  String[]  @default([])
+  skills        String[]  @default([])
+  
+  // Reputation
+  reputationScore Float   @default(0)
+  feedbackCount   Int     @default(0)
+  
+  // Timestamps
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  lastSyncedAt  DateTime @default(now())
+  
+  // Relations
+  feedbackReceived Feedback[] @relation("FeedbackReceived")
+  feedbackGiven    Feedback[] @relation("FeedbackGiven")
+
+  @@index([name])
+  @@index([reputationScore])
+  @@index([isVerified])
+}
+
+model Feedback {
+  id          String   @id @default(cuid())
+  
+  // Who gave feedback
+  fromWallet  String
+  fromAgent   Agent?   @relation("FeedbackGiven", fields: [fromWallet], references: [wallet])
+  
+  // Who received feedback
+  toWallet    String
+  toAgent     Agent    @relation("FeedbackReceived", fields: [toWallet], references: [wallet])
+  
+  // Feedback content
+  score       Int      // 0-100
+  comment     String?
+  
+  // Verification
+  signature   String   // Wallet signature proving authenticity
+  txHash      String?  // On-chain hash if stored on-chain
+  
+  createdAt   DateTime @default(now())
+
+  @@unique([fromWallet, toWallet])
+  @@index([toWallet])
+  @@index([score])
+}
+
+model SyncState {
+  id          String   @id @default("main")
+  lastSlot    BigInt   @default(0)
+  lastSyncAt  DateTime @default(now())
+}

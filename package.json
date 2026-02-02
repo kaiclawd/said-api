@@ -1,0 +1,34 @@
+{
+  "name": "said-api",
+  "version": "1.0.0",
+  "description": "SAID Protocol API - Agent registry, reputation, and leaderboard",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc && npx prisma generate",
+    "start": "node dist/index.js",
+    "db:push": "prisma db push",
+    "db:migrate": "prisma migrate dev",
+    "db:studio": "prisma studio"
+  },
+  "keywords": ["said", "solana", "ai-agents", "reputation"],
+  "author": "SAID Protocol",
+  "license": "MIT",
+  "dependencies": {
+    "@hono/node-server": "^1.14.1",
+    "@prisma/client": "^6.5.0",
+    "@solana/web3.js": "^1.98.2",
+    "dotenv": "^16.5.0",
+    "hono": "^4.7.4",
+    "prisma": "^6.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
