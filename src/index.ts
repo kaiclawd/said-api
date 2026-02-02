@@ -237,6 +237,7 @@ async function syncAgentsFromChain() {
     });
     
     for (const { pubkey, account } of accounts) {
+      try {
       const data = account.data;
       
       // Parse on-chain data
@@ -244,9 +245,17 @@ async function syncAgentsFromChain() {
       const uriLength = data.readUInt32LE(40);
       const metadataUri = data.subarray(44, 44 + uriLength).toString('utf8');
       const offset = 44 + uriLength;
-      const registeredAt = Number(data.readBigInt64LE(offset));
+      
+      // Parse timestamps with validation (chain stores unix seconds)
+      const rawRegisteredAt = Number(data.readBigInt64LE(offset));
+      const rawVerifiedAt = Number(data.readBigInt64LE(offset + 9));
       const isVerified = data[offset + 8] === 1;
-      const verifiedAt = Number(data.readBigInt64LE(offset + 9));
+      
+      // Validate timestamps are reasonable (between 2020 and 2100)
+      const minTs = 1577836800; // 2020-01-01
+      const maxTs = 4102444800; // 2100-01-01
+      const registeredAt = (rawRegisteredAt > minTs && rawRegisteredAt < maxTs) ? rawRegisteredAt : Math.floor(Date.now() / 1000);
+      const verifiedAt = (rawVerifiedAt > minTs && rawVerifiedAt < maxTs) ? rawVerifiedAt : 0;
       
       // Fetch metadata card
       let card: any = {};
@@ -298,6 +307,9 @@ async function syncAgentsFromChain() {
           lastSyncedAt: new Date(),
         }
       });
+      } catch (e) {
+        console.error(`Failed to sync agent ${pubkey.toString()}:`, e);
+      }
     }
     
     console.log(`Synced ${accounts.length} agents`);
