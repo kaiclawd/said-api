@@ -499,7 +499,7 @@ function escapeXml(str: string): string {
 
 // SVG badge endpoint
 app.get('/api/badge/:wallet.svg', async (c) => {
-  const wallet = c.req.param('wallet').replace('.svg', '');
+  const wallet = (c.req.param('wallet') || '').replace('.svg', '');
   const style = c.req.query('style') || 'default';
   
   const agent = await prisma.agent.findUnique({
@@ -518,7 +518,10 @@ app.get('/api/badge/:wallet.svg', async (c) => {
     return c.body(svg);
   }
   
-  const svg = generateBadgeSvg(agent, style);
+  const svg = generateBadgeSvg({
+    ...agent,
+    name: agent.name || 'Agent'
+  }, style);
   c.header('Content-Type', 'image/svg+xml');
   c.header('Cache-Control', 'public, max-age=300');
   return c.body(svg);
