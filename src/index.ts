@@ -4,6 +4,26 @@ import { serve } from '@hono/node-server';
 import { PrismaClient } from '@prisma/client';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { config } from 'dotenv';
+import nacl from 'tweetnacl';
+import bs58 from 'bs58';
+
+// Verify a Solana wallet signature
+function verifySignature(message: string, signature: string, walletAddress: string): boolean {
+  try {
+    const messageBytes = new TextEncoder().encode(message);
+    const signatureBytes = bs58.decode(signature);
+    const publicKeyBytes = bs58.decode(walletAddress);
+    return nacl.sign.detached.verify(messageBytes, signatureBytes, publicKeyBytes);
+  } catch (e) {
+    console.error('Signature verification error:', e);
+    return false;
+  }
+}
+
+// Generate the message that must be signed for feedback
+function getFeedbackMessage(fromWallet: string, toWallet: string, score: number, timestamp: number): string {
+  return `SAID:feedback:${toWallet}:${score}:${timestamp}`;
+}
 
 config();
 
@@ -123,15 +143,26 @@ app.get('/api/agents/:wallet/feedback', async (c) => {
 app.post('/api/agents/:wallet/feedback', async (c) => {
   const toWallet = c.req.param('wallet');
   const body = await c.req.json();
-  const { fromWallet, score, comment, signature } = body;
+  const { fromWallet, score, comment, signature, timestamp } = body;
   
-  // Validate
-  if (!fromWallet || score === undefined || !signature) {
-    return c.json({ error: 'Missing required fields: fromWallet, score, signature' }, 400);
+  // Validate required fields
+  if (!fromWallet || score === undefined || !signature || !timestamp) {
+    return c.json({ error: 'Missing required fields: fromWallet, score, signature, timestamp' }, 400);
   }
   
   if (score < 0 || score > 100) {
     return c.json({ error: 'Score must be between 0 and 100' }, 400);
+  }
+  
+  // Timestamp must be within last 5 minutes (prevent replay attacks)
+  const now = Date.now();
+  if (Math.abs(now - timestamp) > 5 * 60 * 1000) {
+    return c.json({ error: 'Timestamp too old. Sign a fresh message.' }, 400);
+  }
+  
+  // Can't rate yourself
+  if (fromWallet === toWallet) {
+    return c.json({ error: 'Cannot rate yourself' }, 400);
   }
   
   // Check target agent exists
@@ -140,9 +171,20 @@ app.post('/api/agents/:wallet/feedback', async (c) => {
     return c.json({ error: 'Target agent not found' }, 404);
   }
   
-  // TODO: Verify signature against message
-  // const message = `SAID Feedback: ${fromWallet} rates ${toWallet} ${score}/100`;
-  // const isValid = verifySignature(message, signature, fromWallet);
+  // Verify signature
+  const message = getFeedbackMessage(fromWallet, toWallet, score, timestamp);
+  const isValid = verifySignature(message, signature, fromWallet);
+  
+  if (!isValid) {
+    return c.json({ error: 'Invalid signature. Make sure you signed the correct message.' }, 401);
+  }
+  
+  // Check if fromWallet is a verified agent (for weighted scoring)
+  const fromAgent = await prisma.agent.findUnique({ where: { wallet: fromWallet } });
+  const fromIsVerified = fromAgent?.isVerified || false;
+  
+  // Weight: verified agents count 2x
+  const weight = fromIsVerified ? 2.0 : 1.0;
   
   // Upsert feedback (one per fromWallet->toWallet pair)
   const feedback = await prisma.feedback.upsert({
@@ -155,30 +197,67 @@ app.post('/api/agents/:wallet/feedback', async (c) => {
       score,
       comment,
       signature,
+      weight,
+      fromIsVerified,
     },
     update: {
       score,
       comment,
       signature,
+      weight,
+      fromIsVerified,
     }
   });
   
-  // Recalculate reputation
-  const avgResult = await prisma.feedback.aggregate({
+  // Recalculate weighted reputation
+  const allFeedback = await prisma.feedback.findMany({
     where: { toWallet },
-    _avg: { score: true },
-    _count: true,
+    select: { score: true, weight: true }
   });
+  
+  let totalWeight = 0;
+  let weightedSum = 0;
+  for (const fb of allFeedback) {
+    weightedSum += fb.score * fb.weight;
+    totalWeight += fb.weight;
+  }
+  
+  const weightedScore = totalWeight > 0 ? weightedSum / totalWeight : 0;
   
   await prisma.agent.update({
     where: { wallet: toWallet },
     data: {
-      reputationScore: avgResult._avg.score || 0,
-      feedbackCount: avgResult._count,
+      reputationScore: weightedScore,
+      feedbackCount: allFeedback.length,
     }
   });
   
-  return c.json({ success: true, feedback });
+  return c.json({ 
+    success: true, 
+    feedback,
+    message: fromIsVerified 
+      ? 'Feedback recorded with verified agent bonus (2x weight)' 
+      : 'Feedback recorded'
+  });
+});
+
+// Get message to sign for feedback
+app.get('/api/agents/:wallet/feedback/message', async (c) => {
+  const toWallet = c.req.param('wallet');
+  const { fromWallet, score } = c.req.query();
+  
+  if (!fromWallet || !score) {
+    return c.json({ error: 'Query params required: fromWallet, score' }, 400);
+  }
+  
+  const timestamp = Date.now();
+  const message = getFeedbackMessage(fromWallet, toWallet, parseInt(score), timestamp);
+  
+  return c.json({ 
+    message,
+    timestamp,
+    instructions: 'Sign this exact message with your wallet, then POST to /api/agents/:wallet/feedback with { fromWallet, score, comment?, signature, timestamp }'
+  });
 });
 
 // ============ LEADERBOARD ============

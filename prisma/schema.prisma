@@ -62,9 +62,11 @@ model Feedback {
   // Feedback content
   score       Int      // 0-100
   comment     String?
+  weight      Float    @default(1.0)  // Verified agents = 2.0, others = 1.0
   
   // Verification
   signature   String   // Wallet signature proving authenticity
+  fromIsVerified Boolean @default(false) // Was giver verified at time of feedback?
   txHash      String?  // On-chain hash if stored on-chain
   
   createdAt   DateTime @default(now())
