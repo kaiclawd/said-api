@@ -595,6 +595,7 @@ app.get('/api/stats', async (c) => {
  */
 app.get('/api/verify/:wallet', async (c) => {
   const wallet = c.req.param('wallet');
+  const include = c.req.query('include'); // ?include=payments
 
   const agent = await prisma.agent.findUnique({
     where: { wallet },
@@ -647,6 +648,45 @@ app.get('/api/verify/:wallet', async (c) => {
       profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
       badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
       badgeWithScore: `https://api.saidprotocol.com/api/badge/${wallet}.svg?style=score`,
+    },
+    // Include payments if requested
+    ...(include === 'payments' && {
+      payments: {
+        x402: {
+          enabled: !!agent.x402Wallet,
+          solana: agent.x402Wallet || agent.wallet,
+          evm: null,
+        },
+      },
+    }),
+  });
+});
+
+/**
+ * GET /api/agents/:wallet/payments
+ * Get payment configuration for an agent (x402, etc.)
+ */
+app.get('/api/agents/:wallet/payments', async (c) => {
+  const wallet = c.req.param('wallet');
+
+  const agent = await prisma.agent.findUnique({
+    where: { wallet },
+    select: { wallet: true, x402Wallet: true, name: true, isVerified: true },
+  });
+
+  if (!agent) {
+    return c.json({ error: 'Agent not found' }, 404);
+  }
+
+  return c.json({
+    wallet: agent.wallet,
+    name: agent.name,
+    payments: {
+      x402: {
+        enabled: !!agent.x402Wallet,
+        solana: agent.x402Wallet || agent.wallet, // Default to main wallet if no x402 set
+        evm: null, // Future: add EVM address support
+      },
     },
   });
 });
