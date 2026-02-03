@@ -81,3 +81,13 @@ model SyncState {
   lastSlot    BigInt   @default(0)
   lastSyncAt  DateTime @default(now())
 }
+
+model AgentCard {
+  id          String   @id @default(cuid())
+  wallet      String   @unique
+  cardJson    String   // JSON blob of the agent card
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([wallet])
+}

@@ -385,6 +385,82 @@ app.get('/api/register', (c) => {
   });
 });
 
+// ============ CARD HOSTING ============
+// Host agent cards for agents who don't have their own hosting
+
+// Store a card (called by CLI during registration)
+app.post('/api/cards', async (c) => {
+  const body = await c.req.json();
+  const { wallet, name, description, twitter, website, github, capabilities } = body;
+  
+  if (!wallet || !name) {
+    return c.json({ error: 'Required: wallet, name' }, 400);
+  }
+  
+  // Build card
+  const card = {
+    name,
+    description: description || `${name} - AI Agent on SAID Protocol`,
+    wallet,
+    twitter: twitter || undefined,
+    website: website || undefined,
+    github: github || undefined,
+    capabilities: capabilities || [],
+    created: new Date().toISOString().split('T')[0],
+    verified: false,
+  };
+  
+  // Store in database (we'll serve it from /api/cards/:wallet.json)
+  await prisma.agentCard.upsert({
+    where: { wallet },
+    create: {
+      wallet,
+      cardJson: JSON.stringify(card),
+    },
+    update: {
+      cardJson: JSON.stringify(card),
+      updatedAt: new Date(),
+    }
+  });
+  
+  const cardUri = `https://api.saidprotocol.com/api/cards/${wallet}.json`;
+  
+  return c.json({ 
+    success: true, 
+    cardUri,
+    card,
+  });
+});
+
+// Serve hosted cards
+app.get('/api/cards/:wallet.json', async (c) => {
+  const wallet = (c.req.param('wallet') || '').replace('.json', '');
+  
+  const stored = await prisma.agentCard.findUnique({
+    where: { wallet }
+  });
+  
+  if (!stored) {
+    return c.json({ error: 'Card not found' }, 404);
+  }
+  
+  const card = JSON.parse(stored.cardJson);
+  
+  // Check if agent is now verified and update card
+  const agent = await prisma.agent.findUnique({
+    where: { wallet },
+    select: { isVerified: true }
+  });
+  
+  if (agent) {
+    card.verified = agent.isVerified;
+  }
+  
+  c.header('Content-Type', 'application/json');
+  c.header('Cache-Control', 'public, max-age=60');
+  return c.json(card);
+});
+
 // Generate transaction for registration (returns unsigned transaction)
 app.post('/api/register/prepare', async (c) => {
   const body = await c.req.json();
