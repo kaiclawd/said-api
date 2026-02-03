@@ -6,6 +6,7 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { config } from 'dotenv';
 import nacl from 'tweetnacl';
 import bs58 from 'bs58';
+import { agentdexRoutes } from './integrations/agentdex';
 
 // Verify a Solana wallet signature
 function verifySignature(message: string, signature: string, walletAddress: string): boolean {
@@ -562,6 +563,11 @@ app.get('/api/badge/:wallet', async (c) => {
     profileUrl,
   });
 });
+
+// ============ INTEGRATIONS ============
+
+// AgentDEX integration — identity verification & trade feedback
+app.route('/api/integrations/agentdex', agentdexRoutes);
 
 // ============ STATS ============
 
