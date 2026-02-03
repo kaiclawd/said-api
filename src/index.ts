@@ -143,7 +143,8 @@ app.get('/api/agents/:wallet/feedback', async (c) => {
 app.post('/api/agents/:wallet/feedback', async (c) => {
   const toWallet = c.req.param('wallet');
   const body = await c.req.json();
-  const { fromWallet, score, comment, signature, timestamp } = body;
+  const { fromWallet, score, comment, signature, timestamp, source } = body;
+  // source is optional - identifies the platform (e.g., "agentdex", "superrouter", "w3rt")
   
   // Validate required fields
   if (!fromWallet || score === undefined || !signature || !timestamp) {
@@ -186,6 +187,11 @@ app.post('/api/agents/:wallet/feedback', async (c) => {
   // Weight: verified agents count 2x
   const weight = fromIsVerified ? 2.0 : 1.0;
   
+  // Build comment with source prefix if provided
+  const fullComment = source 
+    ? `[${source}] ${comment || ''}`.trim()
+    : comment;
+
   // Upsert feedback (one per fromWallet->toWallet pair)
   const feedback = await prisma.feedback.upsert({
     where: {
@@ -195,14 +201,14 @@ app.post('/api/agents/:wallet/feedback', async (c) => {
       fromWallet,
       toWallet,
       score,
-      comment,
+      comment: fullComment,
       signature,
       weight,
       fromIsVerified,
     },
     update: {
       score,
-      comment,
+      comment: fullComment,
       signature,
       weight,
       fromIsVerified,
@@ -577,6 +583,99 @@ app.get('/api/stats', async (c) => {
     verifiedAgents: verified,
     averageReputation: avgReputation._avg.reputationScore || 0,
   });
+});
+
+// ============ INTEGRATION ENDPOINTS ============
+// Generic endpoints for any platform to verify agents and submit feedback
+
+/**
+ * GET /api/verify/:wallet
+ * Quick verification endpoint for integrating platforms.
+ * Returns identity, reputation, trust tier, and useful URLs.
+ */
+app.get('/api/verify/:wallet', async (c) => {
+  const wallet = c.req.param('wallet');
+
+  const agent = await prisma.agent.findUnique({
+    where: { wallet },
+    include: {
+      _count: { select: { feedbackReceived: true } },
+    },
+  });
+
+  if (!agent) {
+    return c.json({
+      verified: false,
+      registered: false,
+      wallet,
+      error: 'Agent not registered in SAID Protocol',
+    }, 404);
+  }
+
+  // Compute trust tier for easy gating decisions
+  const trustTier =
+    agent.isVerified && agent.reputationScore >= 70
+      ? 'high'
+      : agent.isVerified || agent.reputationScore >= 40
+        ? 'medium'
+        : 'low';
+
+  return c.json({
+    registered: true,
+    verified: agent.isVerified,
+    wallet: agent.wallet,
+    pda: agent.pda,
+    identity: {
+      name: agent.name,
+      description: agent.description,
+      twitter: agent.twitter,
+      website: agent.website,
+    },
+    reputation: {
+      score: agent.reputationScore,
+      feedbackCount: agent._count.feedbackReceived,
+      trustTier,
+    },
+    endpoints: {
+      mcp: agent.mcpEndpoint ?? null,
+      a2a: agent.a2aEndpoint ?? null,
+    },
+    serviceTypes: agent.serviceTypes,
+    skills: agent.skills,
+    registeredAt: agent.registeredAt.toISOString(),
+    urls: {
+      profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+      badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
+      badgeWithScore: `https://api.saidprotocol.com/api/badge/${wallet}.svg?style=score`,
+    },
+  });
+});
+
+/**
+ * GET /api/trust/:wallet
+ * Minimal trust check - returns just the trust tier.
+ * Use for quick gating decisions.
+ */
+app.get('/api/trust/:wallet', async (c) => {
+  const wallet = c.req.param('wallet');
+
+  const agent = await prisma.agent.findUnique({
+    where: { wallet },
+    select: { isVerified: true, reputationScore: true },
+  });
+
+  if (!agent) {
+    return c.json({ wallet, trustTier: 'none', registered: false });
+  }
+
+  const trustTier =
+    agent.isVerified && agent.reputationScore >= 70
+      ? 'high'
+      : agent.isVerified || agent.reputationScore >= 40
+        ? 'medium'
+        : 'low';
+
+  return c.json({ wallet, trustTier, registered: true, verified: agent.isVerified });
 });
 
 // ============ SYNC (internal) ============
