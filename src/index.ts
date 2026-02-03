@@ -432,33 +432,41 @@ app.post('/api/cards', async (c) => {
   });
 });
 
-// Serve hosted cards
-app.get('/api/cards/:wallet.json', async (c) => {
-  const wallet = (c.req.param('wallet') || '').replace('.json', '');
+// Serve hosted cards (handle both with and without .json extension)
+app.get('/api/cards/:wallet', async (c) => {
+  const rawWallet = c.req.param('wallet') || '';
+  const wallet = rawWallet.replace(/\.json$/, '');
+  console.log('[Card GET] Raw param:', rawWallet, '| Cleaned wallet:', wallet);
   
-  const stored = await prisma.agentCard.findUnique({
-    where: { wallet }
-  });
+  try {
+    const stored = await prisma.agentCard.findUnique({
+      where: { wallet }
+    });
+    console.log('[Card GET] Found:', stored ? 'YES' : 'NO');
+    
+    if (!stored) {
+      return c.json({ error: 'Card not found' }, 404);
+    }
   
-  if (!stored) {
-    return c.json({ error: 'Card not found' }, 404);
+    const card = JSON.parse(stored.cardJson);
+    
+    // Check if agent is now verified and update card
+    const agent = await prisma.agent.findUnique({
+      where: { wallet },
+      select: { isVerified: true }
+    });
+    
+    if (agent) {
+      card.verified = agent.isVerified;
+    }
+    
+    c.header('Content-Type', 'application/json');
+    c.header('Cache-Control', 'public, max-age=60');
+    return c.json(card);
+  } catch (e: any) {
+    console.error('[Card GET] Error:', e.message);
+    return c.json({ error: 'Failed to fetch card' }, 500);
   }
-  
-  const card = JSON.parse(stored.cardJson);
-  
-  // Check if agent is now verified and update card
-  const agent = await prisma.agent.findUnique({
-    where: { wallet },
-    select: { isVerified: true }
-  });
-  
-  if (agent) {
-    card.verified = agent.isVerified;
-  }
-  
-  c.header('Content-Type', 'application/json');
-  c.header('Cache-Control', 'public, max-age=60');
-  return c.json(card);
 });
 
 // Generate transaction for registration (returns unsigned transaction)
