@@ -897,3 +897,4 @@ setInterval(syncAgentsFromChain, 5 * 60 * 1000);
 serve({ fetch: app.fetch, port }, (info) => {
   console.log(`SAID API running on http://localhost:${info.port}`);
 });
+// Rebuild trigger Tue Feb  3 17:46:45 UTC 2026
