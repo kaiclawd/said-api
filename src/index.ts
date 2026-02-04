@@ -315,14 +315,16 @@ app.post('/api/sources/feedback', async (c) => {
   const score = Math.round(baseScore * outcomeMultiplier * source.weight);
   
   // Create feedback record from trusted source
+  // Use kai's wallet as the source since foreign key requires valid agent
+  const SYSTEM_WALLET = '42xhLbEm5ttwzxW6YMJ2UZStX7M8ytTz7s7bsyrdPxMD';
   const feedback = await prisma.feedback.create({
     data: {
-      fromWallet: `source:${source.name}`,
+      fromWallet: SYSTEM_WALLET,
       toWallet: wallet,
       score: Math.max(-100, Math.min(100, score)),
       weight: source.weight,
       comment: `[${source.name}] ${event}${outcome ? `: ${outcome}` : ''}${metadata?.details ? ` - ${metadata.details}` : ''}`,
-      signature: `trusted:${apiKey.slice(0, 16)}:${Date.now()}`,
+      signature: `trusted:${source.name}:${Date.now()}`,
       fromIsVerified: true,
     }
   });
