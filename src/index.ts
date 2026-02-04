@@ -322,6 +322,8 @@ app.post('/api/sources/feedback', async (c) => {
       score: Math.max(-100, Math.min(100, score)),
       weight: source.weight,
       comment: `[${source.name}] ${event}${outcome ? `: ${outcome}` : ''}${metadata?.details ? ` - ${metadata.details}` : ''}`,
+      signature: `trusted:${apiKey.slice(0, 16)}:${Date.now()}`,
+      fromIsVerified: true,
     }
   });
   
