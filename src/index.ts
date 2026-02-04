@@ -266,6 +266,106 @@ app.get('/api/agents/:wallet/feedback/message', async (c) => {
   });
 });
 
+// ============ TRUSTED SOURCE FEEDBACK ============
+
+// Trusted sources (platforms that can submit feedback without user signatures)
+const TRUSTED_SOURCES: Record<string, { name: string; weight: number }> = {
+  'torch_sk_live_7f8a9b2c3d4e5f6a7b8c9d0e': { name: 'torch-market', weight: 1.5 },
+  'solprism_sk_live_a1b2c3d4e5f6g7h8i9j0': { name: 'solprism', weight: 1.5 },
+  'agentdex_sk_live_x1y2z3a4b5c6d7e8f9g0': { name: 'agentdex', weight: 1.2 },
+};
+
+// Event type to score mapping
+const EVENT_SCORES: Record<string, number> = {
+  'token_launch': 15,
+  'trade_complete': 5,
+  'governance_vote': 10,
+  'reasoning_commit': 10,
+  'successful_interaction': 8,
+  'positive_review': 12,
+  'negative_review': -10,
+};
+
+// Trusted source feedback endpoint (API key auth, no wallet signature required)
+app.post('/api/sources/feedback', async (c) => {
+  const apiKey = c.req.header('X-Source-Key');
+  
+  if (!apiKey || !TRUSTED_SOURCES[apiKey]) {
+    return c.json({ error: 'Invalid or missing X-Source-Key header' }, 401);
+  }
+  
+  const source = TRUSTED_SOURCES[apiKey];
+  const body = await c.req.json();
+  const { wallet, event, outcome, metadata } = body;
+  
+  // Validate required fields
+  if (!wallet || !event) {
+    return c.json({ error: 'Missing required fields: wallet, event' }, 400);
+  }
+  
+  // Check agent exists
+  const agent = await prisma.agent.findUnique({ where: { wallet } });
+  if (!agent) {
+    return c.json({ error: 'Agent not found. Must be registered on SAID first.' }, 404);
+  }
+  
+  // Calculate score based on event type and outcome
+  const baseScore = EVENT_SCORES[event] || 5;
+  const outcomeMultiplier = outcome === 'failure' ? -0.5 : 1;
+  const score = Math.round(baseScore * outcomeMultiplier * source.weight);
+  
+  // Create feedback record from trusted source
+  const feedback = await prisma.feedback.create({
+    data: {
+      fromWallet: `source:${source.name}`,
+      toWallet: wallet,
+      score: Math.max(-100, Math.min(100, score)),
+      weight: source.weight,
+      comment: `[${source.name}] ${event}${outcome ? `: ${outcome}` : ''}${metadata?.details ? ` - ${metadata.details}` : ''}`,
+    }
+  });
+  
+  // Recalculate reputation score
+  const allFeedback = await prisma.feedback.findMany({
+    where: { toWallet: wallet }
+  });
+  
+  const totalWeight = allFeedback.reduce((sum, f) => sum + (f.weight || 1), 0);
+  const weightedSum = allFeedback.reduce((sum, f) => sum + f.score * (f.weight || 1), 0);
+  const newScore = totalWeight > 0 ? Math.round(weightedSum / totalWeight) : 0;
+  const clampedScore = Math.max(0, Math.min(100, newScore));
+  
+  // Determine trust tier
+  const trustTier = clampedScore >= 70 ? 'high' : clampedScore >= 30 ? 'medium' : 'low';
+  
+  // Update agent
+  await prisma.agent.update({
+    where: { wallet },
+    data: {
+      reputationScore: clampedScore,
+      feedbackCount: allFeedback.length,
+    }
+  });
+  
+  return c.json({
+    success: true,
+    source: source.name,
+    event,
+    scoreChange: score,
+    newReputationScore: clampedScore,
+    trustTier,
+    feedbackId: feedback.id,
+  });
+});
+
+// Get available event types
+app.get('/api/sources/events', (c) => {
+  return c.json({
+    events: Object.keys(EVENT_SCORES),
+    scores: EVENT_SCORES,
+  });
+});
+
 // ============ LEADERBOARD ============
 
 app.get('/api/leaderboard', async (c) => {
