@@ -22,6 +22,7 @@ model Agent {
   description   String?
   twitter       String?
   website       String?
+  image         String?  // Avatar/profile picture URL
   
   // Service endpoints
   mcpEndpoint   String?

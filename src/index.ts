@@ -819,6 +819,7 @@ app.get('/api/verify/:wallet', async (c) => {
       description: agent.description,
       twitter: agent.twitter,
       website: agent.website,
+      image: agent.image,
     },
     reputation: {
       score: agent.reputationScore,
@@ -964,6 +965,7 @@ async function syncAgentsFromChain() {
           name: card.name,
           description: card.description,
           twitter: card.twitter,
+          image: card.image,
           website: card.website,
           mcpEndpoint: card.mcpEndpoint,
           a2aEndpoint: card.a2aEndpoint,
@@ -978,6 +980,7 @@ async function syncAgentsFromChain() {
           name: card.name,
           description: card.description,
           twitter: card.twitter,
+          image: card.image,
           website: card.website,
           mcpEndpoint: card.mcpEndpoint,
           a2aEndpoint: card.a2aEndpoint,
