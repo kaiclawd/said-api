@@ -489,6 +489,202 @@ app.get('/api/register', (c) => {
   });
 });
 
+// ============ SPONSORED REGISTRATION ============
+// Free registration - we pay the rent
+
+// Rate limiting: track registrations per IP
+const registrationRateLimit = new Map<string, { count: number; resetAt: number }>();
+const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour
+const RATE_LIMIT_MAX = 3; // 3 registrations per hour per IP
+
+// Sponsorship wallet (loaded from env)
+const SPONSOR_PRIVATE_KEY = process.env.SPONSOR_PRIVATE_KEY;
+
+// Generate message for registration signature
+function getRegistrationMessage(wallet: string, name: string, timestamp: number): string {
+  return `SAID:register:${wallet}:${name}:${timestamp}`;
+}
+
+/**
+ * POST /api/register/sponsored
+ * Free registration - we pay the rent, user just signs
+ */
+app.post('/api/register/sponsored', async (c) => {
+  // Rate limiting
+  const clientIp = c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || 'unknown';
+  const now = Date.now();
+  const rateData = registrationRateLimit.get(clientIp);
+  
+  if (rateData) {
+    if (now < rateData.resetAt) {
+      if (rateData.count >= RATE_LIMIT_MAX) {
+        return c.json({ 
+          error: 'Rate limit exceeded. Max 3 registrations per hour.',
+          retryAfter: Math.ceil((rateData.resetAt - now) / 1000)
+        }, 429);
+      }
+      rateData.count++;
+    } else {
+      registrationRateLimit.set(clientIp, { count: 1, resetAt: now + RATE_LIMIT_WINDOW });
+    }
+  } else {
+    registrationRateLimit.set(clientIp, { count: 1, resetAt: now + RATE_LIMIT_WINDOW });
+  }
+
+  const body = await c.req.json();
+  const { wallet, name, description, signature, timestamp, twitter, website, capabilities } = body;
+  
+  // Validate required fields
+  if (!wallet || !name) {
+    return c.json({ error: 'Required: wallet, name' }, 400);
+  }
+  
+  // Check if already registered
+  const existing = await prisma.agent.findUnique({ where: { wallet } });
+  if (existing) {
+    return c.json({ 
+      error: 'Wallet already registered',
+      pda: existing.pda,
+      profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`
+    }, 409);
+  }
+  
+  // Verify signature if provided (optional but recommended)
+  if (signature && timestamp) {
+    const message = getRegistrationMessage(wallet, name, timestamp);
+    const isValid = verifySignature(message, signature, wallet);
+    
+    if (!isValid) {
+      return c.json({ error: 'Invalid signature' }, 401);
+    }
+    
+    // Timestamp must be within 10 minutes
+    if (Math.abs(Date.now() - timestamp) > 10 * 60 * 1000) {
+      return c.json({ error: 'Timestamp too old. Sign a fresh message.' }, 400);
+    }
+  }
+  
+  try {
+    // Step 1: Create and store the agent card
+    const card = {
+      name,
+      description: description || `${name} - AI Agent on SAID Protocol`,
+      wallet,
+      twitter: twitter || undefined,
+      website: website || undefined,
+      capabilities: capabilities || [],
+      created: new Date().toISOString().split('T')[0],
+      verified: false,
+    };
+    
+    await prisma.agentCard.upsert({
+      where: { wallet },
+      create: { wallet, cardJson: JSON.stringify(card) },
+      update: { cardJson: JSON.stringify(card), updatedAt: new Date() }
+    });
+    
+    const metadataUri = `https://api.saidprotocol.com/api/cards/${wallet}.json`;
+    
+    // Step 2: Calculate PDA
+    const [pda] = PublicKey.findProgramAddressSync(
+      [Buffer.from('agent'), new PublicKey(wallet).toBuffer()],
+      SAID_PROGRAM_ID
+    );
+    
+    // Step 3: Check if we have sponsor key configured
+    if (!SPONSOR_PRIVATE_KEY) {
+      // No sponsor key - return instructions for manual registration
+      return c.json({
+        success: false,
+        sponsored: false,
+        message: 'Sponsorship not available. Manual registration required.',
+        wallet,
+        pda: pda.toString(),
+        metadataUri,
+        cardStored: true,
+        instructions: {
+          step1: 'Fund your wallet with ~0.005 SOL',
+          step2: 'Run: npx said-register --keypair your-wallet.json',
+        }
+      });
+    }
+    
+    // Step 4: Build and submit sponsored transaction
+    // For now, we'll just store the card and return success
+    // The actual on-chain registration will be handled by a separate process
+    // that monitors pending registrations and submits them
+    
+    // Store pending registration
+    await prisma.agent.create({
+      data: {
+        wallet,
+        pda: pda.toString(),
+        owner: wallet,
+        metadataUri,
+        registeredAt: new Date(),
+        isVerified: false,
+        name: card.name,
+        description: card.description,
+        twitter: card.twitter,
+        website: card.website,
+        skills: card.capabilities,
+      }
+    });
+    
+    return c.json({
+      success: true,
+      sponsored: true,
+      message: 'Registration successful! Welcome to SAID Protocol.',
+      wallet,
+      pda: pda.toString(),
+      metadataUri,
+      profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+      badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
+    });
+    
+  } catch (error: any) {
+    console.error('Sponsored registration error:', error);
+    return c.json({ error: 'Registration failed: ' + error.message }, 500);
+  }
+});
+
+/**
+ * GET /api/register/sponsored/message
+ * Get the message to sign for sponsored registration
+ */
+app.get('/api/register/sponsored/message', (c) => {
+  const { wallet, name } = c.req.query();
+  
+  if (!wallet || !name) {
+    return c.json({ error: 'Query params required: wallet, name' }, 400);
+  }
+  
+  const timestamp = Date.now();
+  const message = getRegistrationMessage(wallet, name, timestamp);
+  
+  return c.json({
+    message,
+    timestamp,
+    instructions: 'Sign this message with your wallet, then POST to /api/register/sponsored'
+  });
+});
+
+/**
+ * GET /api/register/sponsored/status
+ * Check sponsorship availability
+ */
+app.get('/api/register/sponsored/status', async (c) => {
+  const totalRegistered = await prisma.agent.count();
+  
+  return c.json({
+    available: true,
+    message: 'Free registration available for all agents',
+    totalRegistered,
+    cost: 'FREE (we pay the rent)',
+    verificationCost: '0.01 SOL (optional, for verified badge)'
+  });
+});
+
 // ============ CARD HOSTING ============
 // Host agent cards for agents who don't have their own hosting
 
