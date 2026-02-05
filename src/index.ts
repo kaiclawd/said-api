@@ -490,15 +490,41 @@ app.get('/api/register', (c) => {
 });
 
 // ============ SPONSORED REGISTRATION ============
-// Free registration - we pay the rent
+// Free registration - we pay the rent (first 100 agents)
 
 // Rate limiting: track registrations per IP
 const registrationRateLimit = new Map<string, { count: number; resetAt: number }>();
 const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour
 const RATE_LIMIT_MAX = 3; // 3 registrations per hour per IP
 
+// Sponsorship pool: first 100 agents get free registration
+const SPONSOR_POOL_MAX = 100;
+
 // Sponsorship wallet (loaded from env)
 const SPONSOR_PRIVATE_KEY = process.env.SPONSOR_PRIVATE_KEY;
+
+/**
+ * Get current sponsorship count from database
+ */
+async function getSponsorshipCount(): Promise<number> {
+  const count = await prisma.agent.count({
+    where: { sponsored: true }
+  });
+  return count;
+}
+
+/**
+ * Check if sponsorship slots are available
+ */
+async function isSponsorshipAvailable(): Promise<{ available: boolean; remaining: number; used: number }> {
+  const used = await getSponsorshipCount();
+  const remaining = Math.max(0, SPONSOR_POOL_MAX - used);
+  return {
+    available: remaining > 0,
+    remaining,
+    used
+  };
+}
 
 // Generate message for registration signature
 function getRegistrationMessage(wallet: string, name: string, timestamp: number): string {
@@ -537,6 +563,21 @@ app.post('/api/register/sponsored', async (c) => {
   // Validate required fields
   if (!wallet || !name) {
     return c.json({ error: 'Required: wallet, name' }, 400);
+  }
+  
+  // Check sponsorship availability
+  const sponsorship = await isSponsorshipAvailable();
+  if (!sponsorship.available) {
+    return c.json({
+      error: 'Sponsorship pool exhausted',
+      message: `All ${SPONSOR_POOL_MAX} sponsored slots have been claimed. Registration now requires 0.005 SOL.`,
+      slotsUsed: sponsorship.used,
+      slotsTotal: SPONSOR_POOL_MAX,
+      instructions: {
+        step1: 'Fund your wallet with ~0.005 SOL',
+        step2: 'Run: npx said-register --keypair wallet.json'
+      }
+    }, 410); // 410 Gone - resource no longer available
   }
   
   // Check if already registered
@@ -614,7 +655,7 @@ app.post('/api/register/sponsored', async (c) => {
     // The actual on-chain registration will be handled by a separate process
     // that monitors pending registrations and submits them
     
-    // Store pending registration
+    // Store sponsored registration
     await prisma.agent.create({
       data: {
         wallet,
@@ -623,6 +664,7 @@ app.post('/api/register/sponsored', async (c) => {
         metadataUri,
         registeredAt: new Date(),
         isVerified: false,
+        sponsored: true,  // Mark as sponsored
         name: card.name,
         description: card.description,
         twitter: card.twitter,
@@ -630,6 +672,9 @@ app.post('/api/register/sponsored', async (c) => {
         skills: card.capabilities,
       }
     });
+    
+    // Get remaining slots for response
+    const remainingSlots = SPONSOR_POOL_MAX - (sponsorship.used + 1);
     
     return c.json({
       success: true,
@@ -640,6 +685,7 @@ app.post('/api/register/sponsored', async (c) => {
       metadataUri,
       profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
       badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
+      slotsRemaining: remainingSlots,
     });
     
   } catch (error: any) {
@@ -674,13 +720,19 @@ app.get('/api/register/sponsored/message', (c) => {
  * Check sponsorship availability
  */
 app.get('/api/register/sponsored/status', async (c) => {
+  const sponsorship = await isSponsorshipAvailable();
   const totalRegistered = await prisma.agent.count();
   
   return c.json({
-    available: true,
-    message: 'Free registration available for all agents',
+    available: sponsorship.available,
+    slotsTotal: SPONSOR_POOL_MAX,
+    slotsUsed: sponsorship.used,
+    slotsRemaining: sponsorship.remaining,
     totalRegistered,
-    cost: 'FREE (we pay the rent)',
+    message: sponsorship.available 
+      ? `Free registration available! ${sponsorship.remaining} slots remaining.`
+      : `Sponsorship pool exhausted. Registration now requires 0.005 SOL.`,
+    cost: sponsorship.available ? 'FREE (sponsored)' : '0.005 SOL',
     verificationCost: '0.01 SOL (optional, for verified badge)'
   });
 });

@@ -16,6 +16,7 @@ model Agent {
   registeredAt  DateTime
   isVerified    Boolean  @default(false)
   verifiedAt    DateTime?
+  sponsored     Boolean  @default(false)  // Was registration sponsored (free)?
   
   // Extended metadata (cached from AgentCard)
   name          String?
