@@ -43,6 +43,8 @@ model Agent {
   // Relations
   feedbackReceived Feedback[] @relation("FeedbackReceived")
   feedbackGiven    Feedback[] @relation("FeedbackGiven")
+  attestationsReceived Attestation[] @relation("AttestationsReceived")
+  attestationsGiven    Attestation[] @relation("AttestationsGiven")
 
   @@index([name])
   @@index([reputationScore])
@@ -91,4 +93,36 @@ model AgentCard {
   updatedAt   DateTime @updatedAt
   
   @@index([wallet])
+}
+
+model Attestation {
+  id              String    @id @default(cuid())
+  
+  // Who is attesting
+  attesterWallet  String
+  attester        Agent     @relation("AttestationsGiven", fields: [attesterWallet], references: [wallet])
+  
+  // Who is being attested
+  subjectWallet   String
+  subject         Agent     @relation("AttestationsReceived", fields: [subjectWallet], references: [wallet])
+  
+  // Attestation details
+  type            String    @default("trust")  // trust, endorsement, interaction, skill
+  confidence      Int       @default(50)       // 1-100
+  context         String?                      // Optional note/reason
+  skill           String?                      // For skill attestations: which skill
+  
+  // Verification
+  signature       String?                      // Wallet signature (optional for trusted sources)
+  txHash          String?                      // On-chain anchor (future)
+  
+  // Lifecycle
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  revokedAt       DateTime?
+  
+  @@unique([attesterWallet, subjectWallet, type])
+  @@index([subjectWallet])
+  @@index([attesterWallet])
+  @@index([type])
 }

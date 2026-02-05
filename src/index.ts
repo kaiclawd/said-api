@@ -907,6 +907,422 @@ app.get('/api/trust/:wallet', async (c) => {
   return c.json({ wallet, trustTier, registered: true, verified: agent.isVerified });
 });
 
+// ============ ATTESTATIONS ============
+
+// Generate message for attestation signature
+function getAttestationMessage(attesterWallet: string, subjectWallet: string, type: string, confidence: number, timestamp: number): string {
+  return `SAID:attest:${subjectWallet}:${type}:${confidence}:${timestamp}`;
+}
+
+/**
+ * POST /api/attest
+ * Create an attestation (agent vouching for another agent)
+ */
+app.post('/api/attest', async (c) => {
+  const body = await c.req.json();
+  const { attesterWallet, subjectWallet, type, confidence, context, skill, signature, timestamp } = body;
+  
+  // Validate required fields
+  if (!attesterWallet || !subjectWallet) {
+    return c.json({ error: 'Required: attesterWallet, subjectWallet' }, 400);
+  }
+  
+  // Can't attest yourself
+  if (attesterWallet === subjectWallet) {
+    return c.json({ error: 'Cannot attest yourself' }, 400);
+  }
+  
+  const attestationType = type || 'trust';
+  const attestationConfidence = Math.min(100, Math.max(1, confidence || 50));
+  
+  // Check both agents exist
+  const [attester, subject] = await Promise.all([
+    prisma.agent.findUnique({ where: { wallet: attesterWallet } }),
+    prisma.agent.findUnique({ where: { wallet: subjectWallet } }),
+  ]);
+  
+  if (!attester) {
+    return c.json({ error: 'Attester not registered in SAID' }, 404);
+  }
+  if (!subject) {
+    return c.json({ error: 'Subject not registered in SAID' }, 404);
+  }
+  
+  // If signature provided, verify it
+  if (signature && timestamp) {
+    const message = getAttestationMessage(attesterWallet, subjectWallet, attestationType, attestationConfidence, timestamp);
+    const isValid = verifySignature(message, signature, attesterWallet);
+    
+    if (!isValid) {
+      return c.json({ error: 'Invalid signature' }, 401);
+    }
+    
+    // Timestamp must be within 5 minutes
+    if (Math.abs(Date.now() - timestamp) > 5 * 60 * 1000) {
+      return c.json({ error: 'Timestamp too old' }, 400);
+    }
+  }
+  
+  // Create or update attestation
+  const attestation = await prisma.attestation.upsert({
+    where: {
+      attesterWallet_subjectWallet_type: {
+        attesterWallet,
+        subjectWallet,
+        type: attestationType,
+      }
+    },
+    create: {
+      attesterWallet,
+      subjectWallet,
+      type: attestationType,
+      confidence: attestationConfidence,
+      context,
+      skill: attestationType === 'skill' ? skill : null,
+      signature,
+    },
+    update: {
+      confidence: attestationConfidence,
+      context,
+      skill: attestationType === 'skill' ? skill : null,
+      signature,
+      revokedAt: null, // Un-revoke if previously revoked
+      updatedAt: new Date(),
+    }
+  });
+  
+  // Recalculate subject's trust score based on attestations
+  await recalculateTrustScore(subjectWallet);
+  
+  return c.json({
+    success: true,
+    attestation: {
+      id: attestation.id,
+      attester: attester.name || attesterWallet,
+      subject: subject.name || subjectWallet,
+      type: attestation.type,
+      confidence: attestation.confidence,
+      context: attestation.context,
+    },
+    message: `Attestation recorded: ${attester.name || 'Agent'} vouches for ${subject.name || 'Agent'}`,
+  });
+});
+
+/**
+ * GET /api/attestations/:wallet
+ * Get attestations received by an agent
+ */
+app.get('/api/attestations/:wallet', async (c) => {
+  const wallet = c.req.param('wallet');
+  const { type, limit, offset } = c.req.query();
+  
+  const where: any = { 
+    subjectWallet: wallet,
+    revokedAt: null,
+  };
+  if (type) where.type = type;
+  
+  const attestations = await prisma.attestation.findMany({
+    where,
+    orderBy: { createdAt: 'desc' },
+    take: Math.min(parseInt(limit || '50'), 100),
+    skip: parseInt(offset || '0'),
+    include: {
+      attester: {
+        select: { wallet: true, name: true, isVerified: true, reputationScore: true }
+      }
+    }
+  });
+  
+  const total = await prisma.attestation.count({ where });
+  
+  // Calculate trust score from attestations
+  const trustFromAttestations = attestations.reduce((sum, a) => {
+    const weight = a.attester.isVerified ? 2 : 1;
+    const attesterRepWeight = (a.attester.reputationScore || 50) / 100;
+    return sum + (a.confidence * weight * attesterRepWeight * 0.1);
+  }, 0);
+  
+  return c.json({
+    wallet,
+    attestations: attestations.map(a => ({
+      id: a.id,
+      attester: {
+        wallet: a.attester.wallet,
+        name: a.attester.name,
+        isVerified: a.attester.isVerified,
+        reputationScore: a.attester.reputationScore,
+      },
+      type: a.type,
+      confidence: a.confidence,
+      context: a.context,
+      skill: a.skill,
+      createdAt: a.createdAt,
+    })),
+    total,
+    trustFromAttestations: Math.round(trustFromAttestations),
+  });
+});
+
+/**
+ * GET /api/attestations/:wallet/given
+ * Get attestations given by an agent
+ */
+app.get('/api/attestations/:wallet/given', async (c) => {
+  const wallet = c.req.param('wallet');
+  const { type, limit, offset } = c.req.query();
+  
+  const where: any = { 
+    attesterWallet: wallet,
+    revokedAt: null,
+  };
+  if (type) where.type = type;
+  
+  const attestations = await prisma.attestation.findMany({
+    where,
+    orderBy: { createdAt: 'desc' },
+    take: Math.min(parseInt(limit || '50'), 100),
+    skip: parseInt(offset || '0'),
+    include: {
+      subject: {
+        select: { wallet: true, name: true, isVerified: true }
+      }
+    }
+  });
+  
+  const total = await prisma.attestation.count({ where });
+  
+  return c.json({
+    wallet,
+    attestationsGiven: attestations.map(a => ({
+      id: a.id,
+      subject: {
+        wallet: a.subject.wallet,
+        name: a.subject.name,
+        isVerified: a.subject.isVerified,
+      },
+      type: a.type,
+      confidence: a.confidence,
+      context: a.context,
+      skill: a.skill,
+      createdAt: a.createdAt,
+    })),
+    total,
+  });
+});
+
+/**
+ * DELETE /api/attestations/:id
+ * Revoke an attestation (soft delete)
+ */
+app.delete('/api/attestations/:id', async (c) => {
+  const id = c.req.param('id');
+  const body = await c.req.json().catch(() => ({}));
+  const { wallet, signature, timestamp } = body;
+  
+  const attestation = await prisma.attestation.findUnique({ where: { id } });
+  
+  if (!attestation) {
+    return c.json({ error: 'Attestation not found' }, 404);
+  }
+  
+  // Only attester can revoke
+  if (wallet !== attestation.attesterWallet) {
+    return c.json({ error: 'Only the attester can revoke' }, 403);
+  }
+  
+  // Verify signature if provided
+  if (signature && timestamp) {
+    const message = `SAID:revoke:${id}:${timestamp}`;
+    const isValid = verifySignature(message, signature, wallet);
+    if (!isValid) {
+      return c.json({ error: 'Invalid signature' }, 401);
+    }
+  }
+  
+  // Soft delete
+  await prisma.attestation.update({
+    where: { id },
+    data: { revokedAt: new Date() }
+  });
+  
+  // Recalculate subject's trust score
+  await recalculateTrustScore(attestation.subjectWallet);
+  
+  return c.json({ success: true, message: 'Attestation revoked' });
+});
+
+/**
+ * GET /api/trust-graph/:wallet
+ * Get the web of trust around an agent
+ */
+app.get('/api/trust-graph/:wallet', async (c) => {
+  const wallet = c.req.param('wallet');
+  const depth = Math.min(parseInt(c.req.query('depth') || '1'), 2);
+  
+  const agent = await prisma.agent.findUnique({ 
+    where: { wallet },
+    select: { wallet: true, name: true, isVerified: true, reputationScore: true }
+  });
+  
+  if (!agent) {
+    return c.json({ error: 'Agent not found' }, 404);
+  }
+  
+  // Get attestations received (who trusts this agent)
+  const trustedBy = await prisma.attestation.findMany({
+    where: { subjectWallet: wallet, revokedAt: null },
+    include: {
+      attester: {
+        select: { wallet: true, name: true, isVerified: true, reputationScore: true }
+      }
+    }
+  });
+  
+  // Get attestations given (who this agent trusts)
+  const trusts = await prisma.attestation.findMany({
+    where: { attesterWallet: wallet, revokedAt: null },
+    include: {
+      subject: {
+        select: { wallet: true, name: true, isVerified: true, reputationScore: true }
+      }
+    }
+  });
+  
+  // Build graph nodes and edges
+  const nodes: any[] = [{ 
+    id: wallet, 
+    name: agent.name || wallet.slice(0, 8), 
+    isVerified: agent.isVerified,
+    reputationScore: agent.reputationScore,
+    isCenter: true 
+  }];
+  
+  const edges: any[] = [];
+  const seenWallets = new Set([wallet]);
+  
+  for (const a of trustedBy) {
+    if (!seenWallets.has(a.attester.wallet)) {
+      nodes.push({
+        id: a.attester.wallet,
+        name: a.attester.name || a.attester.wallet.slice(0, 8),
+        isVerified: a.attester.isVerified,
+        reputationScore: a.attester.reputationScore,
+      });
+      seenWallets.add(a.attester.wallet);
+    }
+    edges.push({
+      from: a.attester.wallet,
+      to: wallet,
+      type: a.type,
+      confidence: a.confidence,
+    });
+  }
+  
+  for (const a of trusts) {
+    if (!seenWallets.has(a.subject.wallet)) {
+      nodes.push({
+        id: a.subject.wallet,
+        name: a.subject.name || a.subject.wallet.slice(0, 8),
+        isVerified: a.subject.isVerified,
+        reputationScore: a.subject.reputationScore,
+      });
+      seenWallets.add(a.subject.wallet);
+    }
+    edges.push({
+      from: wallet,
+      to: a.subject.wallet,
+      type: a.type,
+      confidence: a.confidence,
+    });
+  }
+  
+  return c.json({
+    center: wallet,
+    nodes,
+    edges,
+    stats: {
+      trustedByCount: trustedBy.length,
+      trustsCount: trusts.length,
+    }
+  });
+});
+
+/**
+ * GET /api/attest/message
+ * Get the message to sign for an attestation
+ */
+app.get('/api/attest/message', (c) => {
+  const { attesterWallet, subjectWallet, type, confidence } = c.req.query();
+  
+  if (!attesterWallet || !subjectWallet) {
+    return c.json({ error: 'Query params required: attesterWallet, subjectWallet' }, 400);
+  }
+  
+  const timestamp = Date.now();
+  const attestationType = type || 'trust';
+  const attestationConfidence = parseInt(confidence || '50');
+  const message = getAttestationMessage(attesterWallet, subjectWallet, attestationType, attestationConfidence, timestamp);
+  
+  return c.json({
+    message,
+    timestamp,
+    instructions: 'Sign this message with your wallet, then POST to /api/attest with { attesterWallet, subjectWallet, type, confidence, context?, signature, timestamp }',
+  });
+});
+
+/**
+ * Recalculate trust score for an agent based on feedback + attestations
+ */
+async function recalculateTrustScore(wallet: string) {
+  // Get feedback
+  const feedback = await prisma.feedback.findMany({
+    where: { toWallet: wallet },
+    select: { score: true, weight: true }
+  });
+  
+  // Get attestations
+  const attestations = await prisma.attestation.findMany({
+    where: { subjectWallet: wallet, revokedAt: null },
+    include: {
+      attester: {
+        select: { isVerified: true, reputationScore: true }
+      }
+    }
+  });
+  
+  // Calculate weighted feedback score
+  let feedbackWeight = 0;
+  let feedbackSum = 0;
+  for (const f of feedback) {
+    feedbackSum += f.score * (f.weight || 1);
+    feedbackWeight += f.weight || 1;
+  }
+  
+  // Calculate attestation bonus
+  // Higher trust attesters and higher confidence = more weight
+  let attestationBonus = 0;
+  for (const a of attestations) {
+    const attesterWeight = a.attester.isVerified ? 2 : 1;
+    const attesterRepWeight = (a.attester.reputationScore || 50) / 100;
+    attestationBonus += (a.confidence * attesterWeight * attesterRepWeight * 0.1);
+  }
+  
+  // Combine: base from feedback + bonus from attestations
+  const baseScore = feedbackWeight > 0 ? feedbackSum / feedbackWeight : 50;
+  const finalScore = Math.min(100, Math.max(0, baseScore + attestationBonus));
+  
+  await prisma.agent.update({
+    where: { wallet },
+    data: {
+      reputationScore: finalScore,
+      feedbackCount: feedback.length,
+    }
+  });
+  
+  return finalScore;
+}
+
 // ============ SYNC (internal) ============
 
 async function syncAgentsFromChain() {
