@@ -6,6 +6,7 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { config } from 'dotenv';
 import nacl from 'tweetnacl';
 import bs58 from 'bs58';
+import fs from 'fs/promises';
 
 // Verify a Solana wallet signature
 function verifySignature(message: string, signature: string, walletAddress: string): boolean {
@@ -315,51 +316,60 @@ app.post('/api/sources/feedback', async (c) => {
   const score = Math.round(baseScore * outcomeMultiplier * source.weight);
   
   // Create feedback record from trusted source
-  // Use kai's wallet as the source since foreign key requires valid agent
-  const SYSTEM_WALLET = '42xhLbEm5ttwzxW6YMJ2UZStX7M8ytTz7s7bsyrdPxMD';
-  const feedback = await prisma.feedback.create({
-    data: {
-      fromWallet: SYSTEM_WALLET,
-      toWallet: wallet,
-      score: Math.max(-100, Math.min(100, score)),
-      weight: source.weight,
-      comment: `[${source.name}] ${event}${outcome ? `: ${outcome}` : ''}${metadata?.details ? ` - ${metadata.details}` : ''}`,
-      signature: `trusted:${source.name}:${Date.now()}`,
-      fromIsVerified: true,
-    }
-  });
+  // Use SAID System wallet as the source since foreign key requires valid agent
+  const SYSTEM_WALLET = '72onvrQJZkPGLAhWK5MeYc73iyM72P2ABKzDMQ4NpQBL';
   
-  // Recalculate reputation score
-  const allFeedback = await prisma.feedback.findMany({
-    where: { toWallet: wallet }
-  });
-  
-  const totalWeight = allFeedback.reduce((sum, f) => sum + (f.weight || 1), 0);
-  const weightedSum = allFeedback.reduce((sum, f) => sum + f.score * (f.weight || 1), 0);
-  const newScore = totalWeight > 0 ? Math.round(weightedSum / totalWeight) : 0;
-  const clampedScore = Math.max(0, Math.min(100, newScore));
-  
-  // Determine trust tier
-  const trustTier = clampedScore >= 70 ? 'high' : clampedScore >= 30 ? 'medium' : 'low';
-  
-  // Update agent
-  await prisma.agent.update({
-    where: { wallet },
-    data: {
-      reputationScore: clampedScore,
-      feedbackCount: allFeedback.length,
-    }
-  });
-  
-  return c.json({
-    success: true,
-    source: source.name,
-    event,
-    scoreChange: score,
-    newReputationScore: clampedScore,
-    trustTier,
-    feedbackId: feedback.id,
-  });
+  try {
+    const feedback = await prisma.feedback.create({
+      data: {
+        fromWallet: SYSTEM_WALLET,
+        toWallet: wallet,
+        score: Math.max(-100, Math.min(100, score)),
+        weight: source.weight,
+        comment: `[${source.name}] ${event}${outcome ? `: ${outcome}` : ''}${metadata?.details ? ` - ${metadata.details}` : ''}`,
+        signature: `trusted:${source.name}:${Date.now()}`,
+        fromIsVerified: true,
+      }
+    });
+    
+    // Recalculate reputation score
+    const allFeedback = await prisma.feedback.findMany({
+      where: { toWallet: wallet }
+    });
+    
+    const totalWeight = allFeedback.reduce((sum, f) => sum + (f.weight || 1), 0);
+    const weightedSum = allFeedback.reduce((sum, f) => sum + f.score * (f.weight || 1), 0);
+    const newScore = totalWeight > 0 ? Math.round(weightedSum / totalWeight) : 0;
+    const clampedScore = Math.max(0, Math.min(100, newScore));
+    
+    // Determine trust tier
+    const trustTier = clampedScore >= 70 ? 'high' : clampedScore >= 30 ? 'medium' : 'low';
+    
+    // Update agent
+    await prisma.agent.update({
+      where: { wallet },
+      data: {
+        reputationScore: clampedScore,
+        feedbackCount: allFeedback.length,
+      }
+    });
+    
+    return c.json({
+      success: true,
+      source: source.name,
+      event,
+      scoreChange: score,
+      newReputationScore: clampedScore,
+      trustTier,
+      feedbackId: feedback.id,
+    });
+  } catch (err: any) {
+    console.error('Feedback creation error:', err);
+    return c.json({ 
+      error: 'Failed to create feedback', 
+      details: err.message || 'Unknown error'
+    }, 500);
+  }
 });
 
 // Get available event types
@@ -735,6 +745,106 @@ app.get('/api/register/sponsored/status', async (c) => {
     cost: sponsorship.available ? 'FREE (sponsored)' : '0.005 SOL',
     verificationCost: '0.01 SOL (optional, for verified badge)'
   });
+});
+
+// ============ PENDING REGISTRATION (OFF-CHAIN, FREE) ============
+/**
+ * POST /api/register/pending
+ * Register an agent off-chain (free, instant, no SOL required)
+ * Status: PENDING - can upgrade to REGISTERED (on-chain) later
+ */
+app.post('/api/register/pending', async (c) => {
+  const body = await c.req.json();
+  const { wallet, name, description, twitter, website, capabilities } = body;
+  
+  // Validate required fields
+  if (!wallet || !name) {
+    return c.json({ error: 'Required: wallet, name' }, 400);
+  }
+  
+  // Check if already registered
+  const existing = await prisma.agent.findUnique({ where: { wallet } });
+  if (existing) {
+    return c.json({ 
+      success: true,
+      message: 'Already registered',
+      wallet,
+      pda: existing.pda,
+      status: existing.isVerified ? 'VERIFIED' : (existing.sponsored ? 'REGISTERED' : 'PENDING'),
+      profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`
+    });
+  }
+  
+  try {
+    // Compute PDA (deterministic)
+    const [pda] = PublicKey.findProgramAddressSync(
+      [Buffer.from('agent'), new PublicKey(wallet).toBuffer()],
+      SAID_PROGRAM_ID
+    );
+    
+    // Build card
+    const card = {
+      name,
+      description: description || `${name} - AI Agent on SAID Protocol`,
+      wallet,
+      twitter: twitter || undefined,
+      website: website || undefined,
+      capabilities: capabilities || ['chat', 'assistant'],
+      status: 'PENDING',
+      registeredAt: new Date().toISOString(),
+    };
+    
+    const metadataUri = `https://api.saidprotocol.com/api/cards/${wallet}.json`;
+    
+    // Store card in database (for /api/cards/:wallet.json endpoint)
+    await prisma.agentCard.upsert({
+      where: { wallet },
+      create: {
+        wallet,
+        cardJson: JSON.stringify(card),
+      },
+      update: {
+        cardJson: JSON.stringify(card),
+      }
+    });
+    
+    // Store in database with PENDING status (not sponsored = off-chain only)
+    await prisma.agent.create({
+      data: {
+        wallet,
+        pda: pda.toString(),
+        owner: wallet,
+        metadataUri,
+        registeredAt: new Date(),
+        isVerified: false,
+        sponsored: false,  // PENDING = not on-chain yet
+        name: card.name,
+        description: card.description,
+        twitter: card.twitter,
+        website: card.website,
+        skills: card.capabilities,
+      }
+    });
+    
+    return c.json({
+      success: true,
+      message: 'Agent registered (PENDING). Upgrade to on-chain anytime.',
+      wallet,
+      pda: pda.toString(),
+      status: 'PENDING',
+      metadataUri,
+      profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+      badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
+      upgrade: {
+        cost: '0.005 SOL',
+        instructions: 'Fund wallet and run: npx said-anchor'
+      }
+    });
+    
+  } catch (error: any) {
+    console.error('Pending registration error:', error);
+    return c.json({ error: 'Registration failed: ' + error.message }, 500);
+  }
 });
 
 // ============ CARD HOSTING ============
