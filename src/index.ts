@@ -1716,13 +1716,21 @@ async function syncAgentsFromChain() {
       let card: any = {};
       try {
         let uri = metadataUri;
-        if (uri.includes('saidprotocol.com') && !uri.includes('www.')) {
-          uri = uri.replace('saidprotocol.com', 'www.saidprotocol.com');
+        // Fix www prefix only for main site, not api subdomain
+        if (uri.includes('://saidprotocol.com') || uri.includes('://www.saidprotocol.com')) {
+          uri = uri.replace('://saidprotocol.com', '://www.saidprotocol.com');
         }
+        // api.saidprotocol.com should remain unchanged
         const res = await fetch(uri);
-        if (res.ok) card = await res.json();
+        if (res.ok) {
+          const text = await res.text();
+          // Only parse as JSON if it looks like JSON (not HTML)
+          if (text.trim().startsWith('{')) {
+            card = JSON.parse(text);
+          }
+        }
       } catch (e) {
-        // Skip failed fetches
+        console.log(`Failed to fetch card for ${owner}: ${e}`);
       }
       
       // Upsert agent
