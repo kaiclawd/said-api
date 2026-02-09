@@ -28,6 +28,7 @@
     "dotenv": "^16.5.0",
     "hono": "^4.7.4",
     "prisma": "^6.5.0",
+    "resend": "^6.9.1",
     "tweetnacl": "^1.0.3"
   },
   "devDependencies": {

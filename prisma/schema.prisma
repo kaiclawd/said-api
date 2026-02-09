@@ -172,3 +172,15 @@ model UserAgent {
   @@index([userId])
   @@index([agentWallet])
 }
+
+model EmailOTP {
+  id              String    @id @default(cuid())
+  email           String
+  code            String
+  expiresAt       DateTime
+  verified        Boolean   @default(false)
+  createdAt       DateTime  @default(now())
+  
+  @@index([email])
+  @@index([code])
+}

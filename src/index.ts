@@ -7,6 +7,7 @@ import { config } from 'dotenv';
 import nacl from 'tweetnacl';
 import bs58 from 'bs58';
 import fs from 'fs/promises';
+import { Resend } from 'resend';
 
 // Verify a Solana wallet signature
 function verifySignature(message: string, signature: string, walletAddress: string): boolean {
@@ -30,6 +31,7 @@ config();
 
 const prisma = new PrismaClient();
 const app = new Hono();
+const resend = new Resend(process.env.RESEND_API_KEY || '');
 
 // SAID Program constants
 const SAID_PROGRAM_ID = new PublicKey('5dpw6KEQPn248pnkkaYyWfHwu2nfb3LUMbTucb6LaA8G');
@@ -1762,14 +1764,86 @@ app.post('/auth/login-wallet', async (c) => {
   }
 });
 
-// POST /auth/login-email
-app.post('/auth/login-email', async (c) => {
+// POST /auth/send-otp
+app.post('/auth/send-otp', async (c) => {
   try {
     const { email } = await c.req.json();
     
     if (!email || !email.includes('@')) {
       return c.json({ error: 'Valid email required' }, 400);
     }
+    
+    // Generate 6-digit OTP
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    
+    // Store OTP
+    await prisma.emailOTP.create({
+      data: {
+        email: email.toLowerCase(),
+        code,
+        expiresAt,
+      }
+    });
+    
+    // Send email via Resend
+    try {
+      await resend.emails.send({
+        from: 'SAID Protocol <noreply@saidprotocol.com>',
+        to: email,
+        subject: 'Your SAID login code',
+        html: `
+          <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2>Your login code</h2>
+            <p>Enter this code to log in to SAID Protocol:</p>
+            <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; text-align: center; font-size: 32px; font-weight: bold; letter-spacing: 8px;">
+              ${code}
+            </div>
+            <p style="color: #666; margin-top: 20px;">This code expires in 10 minutes.</p>
+          </div>
+        `
+      });
+    } catch (emailErr) {
+      console.error('Email send error:', emailErr);
+      return c.json({ error: 'Failed to send email' }, 500);
+    }
+    
+    return c.json({ ok: true });
+  } catch (e: any) {
+    console.error('Send OTP error:', e);
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// POST /auth/verify-otp
+app.post('/auth/verify-otp', async (c) => {
+  try {
+    const { email, code } = await c.req.json();
+    
+    if (!email || !code) {
+      return c.json({ error: 'Email and code required' }, 400);
+    }
+    
+    // Find valid OTP
+    const otp = await prisma.emailOTP.findFirst({
+      where: {
+        email: email.toLowerCase(),
+        code,
+        verified: false,
+        expiresAt: { gt: new Date() }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+    
+    if (!otp) {
+      return c.json({ error: 'Invalid or expired code' }, 400);
+    }
+    
+    // Mark as verified
+    await prisma.emailOTP.update({
+      where: { id: otp.id },
+      data: { verified: true }
+    });
     
     // Find or create user
     let user = await prisma.user.findUnique({
@@ -1780,14 +1854,17 @@ app.post('/auth/login-email', async (c) => {
       user = await prisma.user.create({
         data: {
           email: email.toLowerCase(),
-          emailVerified: false,  // In production: send verification email
+          emailVerified: true,
           lastLoginAt: new Date(),
         }
       });
     } else {
       user = await prisma.user.update({
         where: { id: user.id },
-        data: { lastLoginAt: new Date() }
+        data: { 
+          emailVerified: true,
+          lastLoginAt: new Date() 
+        }
       });
     }
     
@@ -1811,7 +1888,7 @@ app.post('/auth/login-email', async (c) => {
       expiresAt: sessionExpiry.toISOString(),
     });
   } catch (e: any) {
-    console.error('Email login error:', e);
+    console.error('Verify OTP error:', e);
     return c.json({ error: e.message }, 500);
   }
 });
