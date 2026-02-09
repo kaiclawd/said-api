@@ -46,6 +46,7 @@ model Agent {
   feedbackGiven    Feedback[] @relation("FeedbackGiven")
   attestationsReceived Attestation[] @relation("AttestationsReceived")
   attestationsGiven    Attestation[] @relation("AttestationsGiven")
+  createdByUsers   UserAgent[]
 
   @@index([name])
   @@index([reputationScore])
@@ -126,4 +127,48 @@ model Attestation {
   @@index([subjectWallet])
   @@index([attesterWallet])
   @@index([type])
+}
+
+model User {
+  id              String    @id @default(cuid())
+  
+  // Login methods (one of these is set)
+  walletAddress   String?   @unique
+  email           String?   @unique
+  emailVerified   Boolean   @default(false)
+  
+  // Profile
+  displayName     String?
+  
+  // Session management
+  sessionToken    String?   @unique
+  sessionExpiry   DateTime?
+  
+  // Timestamps
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  lastLoginAt     DateTime  @default(now())
+  
+  // Relations
+  agents          UserAgent[]
+  
+  @@index([walletAddress])
+  @@index([email])
+  @@index([sessionToken])
+}
+
+model UserAgent {
+  id              String    @id @default(cuid())
+  
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  agentWallet     String
+  agent           Agent     @relation(fields: [agentWallet], references: [wallet], onDelete: Cascade)
+  
+  createdAt       DateTime  @default(now())
+  
+  @@unique([userId, agentWallet])
+  @@index([userId])
+  @@index([agentWallet])
 }

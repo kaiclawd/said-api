@@ -1681,6 +1681,229 @@ async function recalculateTrustScore(wallet: string) {
   return finalScore;
 }
 
+// ============ AUTH ============
+
+// Generate session token
+function generateSessionToken(): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(32)))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+// Verify user session
+async function verifySession(authHeader: string | null): Promise<any> {
+  if (!authHeader?.startsWith('Bearer ')) return null;
+  const token = authHeader.substring(7);
+  
+  const user = await prisma.user.findUnique({
+    where: { sessionToken: token },
+  });
+  
+  if (!user || !user.sessionExpiry || user.sessionExpiry < new Date()) {
+    return null;
+  }
+  
+  return user;
+}
+
+// POST /auth/login-wallet
+app.post('/auth/login-wallet', async (c) => {
+  try {
+    const { walletAddress, signature, message } = await c.req.json();
+    
+    if (!walletAddress) {
+      return c.json({ error: 'walletAddress required' }, 400);
+    }
+    
+    // TODO: Verify signature (for now, trust the wallet address)
+    // In production: verify the signature matches the message signed by the wallet
+    
+    // Find or create user
+    let user = await prisma.user.findUnique({
+      where: { walletAddress }
+    });
+    
+    if (!user) {
+      user = await prisma.user.create({
+        data: {
+          walletAddress,
+          lastLoginAt: new Date(),
+        }
+      });
+    } else {
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: { lastLoginAt: new Date() }
+      });
+    }
+    
+    // Generate session token (valid for 30 days)
+    const sessionToken = generateSessionToken();
+    const sessionExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { sessionToken, sessionExpiry }
+    });
+    
+    return c.json({
+      ok: true,
+      user: {
+        id: user.id,
+        walletAddress: user.walletAddress,
+        displayName: user.displayName,
+      },
+      sessionToken,
+      expiresAt: sessionExpiry.toISOString(),
+    });
+  } catch (e: any) {
+    console.error('Login error:', e);
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// POST /auth/login-email
+app.post('/auth/login-email', async (c) => {
+  try {
+    const { email } = await c.req.json();
+    
+    if (!email || !email.includes('@')) {
+      return c.json({ error: 'Valid email required' }, 400);
+    }
+    
+    // Find or create user
+    let user = await prisma.user.findUnique({
+      where: { email: email.toLowerCase() }
+    });
+    
+    if (!user) {
+      user = await prisma.user.create({
+        data: {
+          email: email.toLowerCase(),
+          emailVerified: false,  // In production: send verification email
+          lastLoginAt: new Date(),
+        }
+      });
+    } else {
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: { lastLoginAt: new Date() }
+      });
+    }
+    
+    // Generate session token (valid for 30 days)
+    const sessionToken = generateSessionToken();
+    const sessionExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { sessionToken, sessionExpiry }
+    });
+    
+    return c.json({
+      ok: true,
+      user: {
+        id: user.id,
+        email: user.email,
+        displayName: user.displayName,
+      },
+      sessionToken,
+      expiresAt: sessionExpiry.toISOString(),
+    });
+  } catch (e: any) {
+    console.error('Email login error:', e);
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// GET /auth/me
+app.get('/auth/me', async (c) => {
+  const user = await verifySession(c.req.header('Authorization'));
+  
+  if (!user) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+  
+  return c.json({
+    ok: true,
+    user: {
+      id: user.id,
+      walletAddress: user.walletAddress,
+      email: user.email,
+      displayName: user.displayName,
+      createdAt: user.createdAt,
+    }
+  });
+});
+
+// GET /users/me/agents
+app.get('/users/me/agents', async (c) => {
+  const user = await verifySession(c.req.header('Authorization'));
+  
+  if (!user) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+  
+  const userAgents = await prisma.userAgent.findMany({
+    where: { userId: user.id },
+    include: {
+      agent: true,
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+  
+  return c.json({
+    ok: true,
+    agents: userAgents.map(ua => ua.agent),
+  });
+});
+
+// POST /users/me/agents
+app.post('/users/me/agents', async (c) => {
+  const user = await verifySession(c.req.header('Authorization'));
+  
+  if (!user) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+  
+  try {
+    const { agentWallet } = await c.req.json();
+    
+    if (!agentWallet) {
+      return c.json({ error: 'agentWallet required' }, 400);
+    }
+    
+    // Check if agent exists
+    const agent = await prisma.agent.findUnique({
+      where: { wallet: agentWallet }
+    });
+    
+    if (!agent) {
+      return c.json({ error: 'Agent not found' }, 404);
+    }
+    
+    // Link agent to user (idempotent)
+    await prisma.userAgent.upsert({
+      where: {
+        userId_agentWallet: {
+          userId: user.id,
+          agentWallet: agentWallet,
+        }
+      },
+      create: {
+        userId: user.id,
+        agentWallet: agentWallet,
+      },
+      update: {}, // No-op if already linked
+    });
+    
+    return c.json({ ok: true });
+  } catch (e: any) {
+    console.error('Link agent error:', e);
+    return c.json({ error: e.message }, 500);
+  }
+});
+
 // ============ SYNC (internal) ============
 
 async function syncAgentsFromChain() {
