@@ -1691,7 +1691,7 @@ function generateSessionToken(): string {
 }
 
 // Verify user session
-async function verifySession(authHeader: string | null): Promise<any> {
+async function verifySession(authHeader: string | undefined): Promise<any> {
   if (!authHeader?.startsWith('Bearer ')) return null;
   const token = authHeader.substring(7);
   
