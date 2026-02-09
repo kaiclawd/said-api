@@ -1795,7 +1795,7 @@ app.post('/auth/send-otp', async (c) => {
     
     try {
       await resend.emails.send({
-        from: 'SAID Protocol <noreply@saidprotocol.com>',
+        from: 'SAID Protocol <noreply@login.saidprotocol.com>',
         to: email,
         subject: 'Your SAID login code',
         html: `
