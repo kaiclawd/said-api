@@ -31,7 +31,7 @@ config();
 
 const prisma = new PrismaClient();
 const app = new Hono();
-const resend = new Resend(process.env.RESEND_API_KEY || '');
+const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 
 // SAID Program constants
 const SAID_PROGRAM_ID = new PublicKey('5dpw6KEQPn248pnkkaYyWfHwu2nfb3LUMbTucb6LaA8G');
@@ -1787,6 +1787,12 @@ app.post('/auth/send-otp', async (c) => {
     });
     
     // Send email via Resend
+    if (!resend) {
+      console.error('Resend not configured - RESEND_API_KEY missing');
+      console.log(`DEV MODE: OTP code for ${email}: ${code}`);
+      return c.json({ ok: true }); // For dev without email
+    }
+    
     try {
       await resend.emails.send({
         from: 'SAID Protocol <noreply@saidprotocol.com>',
