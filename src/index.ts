@@ -45,7 +45,12 @@ const connection = new Connection(
 
 // CORS
 app.use('/*', cors({
-  origin: ['https://www.saidprotocol.com', 'https://saidprotocol.com', 'http://localhost:3000'],
+  origin: [
+    'https://www.saidprotocol.com',
+    'https://saidprotocol.com',
+    'http://localhost:3000',
+    'https://devoted-cooperation-production-8f30.up.railway.app'
+  ],
   allowMethods: ['GET', 'POST', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization'],
 }));
@@ -1764,140 +1769,7 @@ app.post('/auth/login-wallet', async (c) => {
   }
 });
 
-// POST /auth/send-otp
-app.post('/auth/send-otp', async (c) => {
-  try {
-    const { email } = await c.req.json();
-    
-    if (!email || !email.includes('@')) {
-      return c.json({ error: 'Valid email required' }, 400);
-    }
-    
-    // Generate 6-digit OTP
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-    
-    // Store OTP
-    await prisma.emailOTP.create({
-      data: {
-        email: email.toLowerCase(),
-        code,
-        expiresAt,
-      }
-    });
-    
-    // Send email via Resend
-    if (!resend) {
-      console.error('Resend not configured - RESEND_API_KEY missing');
-      console.log(`DEV MODE: OTP code for ${email}: ${code}`);
-      return c.json({ ok: true }); // For dev without email
-    }
-    
-    try {
-      await resend.emails.send({
-        from: 'SAID Protocol <noreply@login.saidprotocol.com>',
-        to: email,
-        subject: 'Your SAID login code',
-        html: `
-          <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2>Your login code</h2>
-            <p>Enter this code to log in to SAID Protocol:</p>
-            <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; text-align: center; font-size: 32px; font-weight: bold; letter-spacing: 8px;">
-              ${code}
-            </div>
-            <p style="color: #666; margin-top: 20px;">This code expires in 10 minutes.</p>
-          </div>
-        `
-      });
-    } catch (emailErr) {
-      console.error('Email send error:', emailErr);
-      return c.json({ error: 'Failed to send email' }, 500);
-    }
-    
-    return c.json({ ok: true });
-  } catch (e: any) {
-    console.error('Send OTP error:', e);
-    return c.json({ error: e.message }, 500);
-  }
-});
-
-// POST /auth/verify-otp
-app.post('/auth/verify-otp', async (c) => {
-  try {
-    const { email, code } = await c.req.json();
-    
-    if (!email || !code) {
-      return c.json({ error: 'Email and code required' }, 400);
-    }
-    
-    // Find valid OTP
-    const otp = await prisma.emailOTP.findFirst({
-      where: {
-        email: email.toLowerCase(),
-        code,
-        verified: false,
-        expiresAt: { gt: new Date() }
-      },
-      orderBy: { createdAt: 'desc' }
-    });
-    
-    if (!otp) {
-      return c.json({ error: 'Invalid or expired code' }, 400);
-    }
-    
-    // Mark as verified
-    await prisma.emailOTP.update({
-      where: { id: otp.id },
-      data: { verified: true }
-    });
-    
-    // Find or create user
-    let user = await prisma.user.findUnique({
-      where: { email: email.toLowerCase() }
-    });
-    
-    if (!user) {
-      user = await prisma.user.create({
-        data: {
-          email: email.toLowerCase(),
-          emailVerified: true,
-          lastLoginAt: new Date(),
-        }
-      });
-    } else {
-      user = await prisma.user.update({
-        where: { id: user.id },
-        data: { 
-          emailVerified: true,
-          lastLoginAt: new Date() 
-        }
-      });
-    }
-    
-    // Generate session token (valid for 30 days)
-    const sessionToken = generateSessionToken();
-    const sessionExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-    
-    await prisma.user.update({
-      where: { id: user.id },
-      data: { sessionToken, sessionExpiry }
-    });
-    
-    return c.json({
-      ok: true,
-      user: {
-        id: user.id,
-        email: user.email,
-        displayName: user.displayName,
-      },
-      sessionToken,
-      expiresAt: sessionExpiry.toISOString(),
-    });
-  } catch (e: any) {
-    console.error('Verify OTP error:', e);
-    return c.json({ error: e.message }, 500);
-  }
-});
+// Auth via Privy - endpoints removed (using Privy SDK client-side)
 
 // GET /auth/me
 app.get('/auth/me', async (c) => {
