@@ -1853,6 +1853,42 @@ app.get('/auth/me', async (c) => {
   });
 });
 
+// PATCH /auth/me - Update user profile
+app.patch('/auth/me', async (c) => {
+  const user = await verifySession(c.req.header('Authorization'));
+  
+  if (!user) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+  
+  try {
+    const body = await c.req.json();
+    const { displayName } = body;
+    
+    // Update user in database
+    const updatedUser = await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        displayName: displayName || user.displayName,
+      },
+    });
+    
+    return c.json({
+      ok: true,
+      user: {
+        id: updatedUser.id,
+        walletAddress: updatedUser.walletAddress,
+        email: updatedUser.email,
+        displayName: updatedUser.displayName,
+        createdAt: updatedUser.createdAt,
+      }
+    });
+  } catch (e: any) {
+    console.error('Update profile error:', e);
+    return c.json({ error: e.message }, 500);
+  }
+});
+
 // GET /users/me/agents
 app.get('/users/me/agents', async (c) => {
   const user = await verifySession(c.req.header('Authorization'));
