@@ -49,7 +49,8 @@ app.use('/*', cors({
     'https://www.saidprotocol.com',
     'https://saidprotocol.com',
     'http://localhost:3000',
-    'https://devoted-cooperation-production-8f30.up.railway.app'
+    'https://devoted-cooperation-production-8f30.up.railway.app',
+    'https://staging-v2-production.up.railway.app'
   ],
   allowMethods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization'],
