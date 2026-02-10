@@ -141,6 +141,7 @@ model User {
   // Profile
   displayName     String?
   username        String?   @unique
+  avatarUrl       String?   @db.Text
   
   // Session management
   sessionToken    String?   @unique

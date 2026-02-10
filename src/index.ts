@@ -1850,6 +1850,7 @@ app.get('/auth/me', async (c) => {
       email: user.email,
       displayName: user.displayName,
       username: user.username,
+      avatarUrl: user.avatarUrl,
       createdAt: user.createdAt,
     }
   });
@@ -1865,12 +1866,22 @@ app.patch('/auth/me', async (c) => {
   
   try {
     const body = await c.req.json();
-    const { displayName, username } = body;
+    const { displayName, username, avatarUrl } = body;
     
     // Build update data
     const updateData: any = {};
     if (displayName !== undefined) updateData.displayName = displayName;
     if (username !== undefined) updateData.username = username;
+    if (avatarUrl !== undefined) {
+      // Validate avatar is a data URL and not too large (max 500KB base64)
+      if (avatarUrl && !avatarUrl.startsWith('data:image/')) {
+        return c.json({ error: 'Invalid avatar format' }, 400);
+      }
+      if (avatarUrl && avatarUrl.length > 700000) {
+        return c.json({ error: 'Avatar too large (max 500KB)' }, 400);
+      }
+      updateData.avatarUrl = avatarUrl;
+    }
     
     // Update user in database
     const updatedUser = await prisma.user.update({
@@ -1886,6 +1897,7 @@ app.patch('/auth/me', async (c) => {
         email: updatedUser.email,
         displayName: updatedUser.displayName,
         username: updatedUser.username,
+        avatarUrl: updatedUser.avatarUrl,
         createdAt: updatedUser.createdAt,
       }
     });
