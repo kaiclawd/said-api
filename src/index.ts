@@ -2077,6 +2077,22 @@ async function syncAgentsFromChain() {
   }
 }
 
+// TEMP: Admin link agent to user
+app.post('/admin/link-agent', async (c) => {
+  const { secret, agentWallet, privyId } = await c.req.json();
+  if (secret !== 'temp-link-2026') return c.json({ error: 'Unauthorized' }, 401);
+  
+  const user = await prisma.user.findFirst({ where: { privyId } });
+  if (!user) return c.json({ error: 'User not found' }, 404);
+  
+  const result = await prisma.userAgent.upsert({
+    where: { userId_agentWallet: { userId: user.id, agentWallet } },
+    create: { userId: user.id, agentWallet },
+    update: {}
+  });
+  return c.json({ ok: true, result });
+});
+
 // ============ START ============
 
 const port = parseInt(process.env.PORT || '3001');
