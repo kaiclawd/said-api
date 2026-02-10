@@ -51,7 +51,7 @@ app.use('/*', cors({
     'http://localhost:3000',
     'https://devoted-cooperation-production-8f30.up.railway.app'
   ],
-  allowMethods: ['GET', 'POST', 'OPTIONS'],
+  allowMethods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization'],
 }));
 
