@@ -1849,6 +1849,7 @@ app.get('/auth/me', async (c) => {
       walletAddress: user.walletAddress,
       email: user.email,
       displayName: user.displayName,
+      username: user.username,
       createdAt: user.createdAt,
     }
   });
@@ -1864,14 +1865,17 @@ app.patch('/auth/me', async (c) => {
   
   try {
     const body = await c.req.json();
-    const { displayName } = body;
+    const { displayName, username } = body;
+    
+    // Build update data
+    const updateData: any = {};
+    if (displayName !== undefined) updateData.displayName = displayName;
+    if (username !== undefined) updateData.username = username;
     
     // Update user in database
     const updatedUser = await prisma.user.update({
       where: { id: user.id },
-      data: {
-        displayName: displayName || user.displayName,
-      },
+      data: updateData,
     });
     
     return c.json({
@@ -1881,6 +1885,7 @@ app.patch('/auth/me', async (c) => {
         walletAddress: updatedUser.walletAddress,
         email: updatedUser.email,
         displayName: updatedUser.displayName,
+        username: updatedUser.username,
         createdAt: updatedUser.createdAt,
       }
     });
