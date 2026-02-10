@@ -133,6 +133,7 @@ model User {
   id              String    @id @default(cuid())
   
   // Login methods (one of these is set)
+  privyId         String?   @unique
   walletAddress   String?   @unique
   email           String?   @unique
   emailVerified   Boolean   @default(false)
@@ -152,6 +153,7 @@ model User {
   // Relations
   agents          UserAgent[]
   
+  @@index([privyId])
   @@index([walletAddress])
   @@index([email])
   @@index([sessionToken])

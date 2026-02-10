@@ -1769,7 +1769,69 @@ app.post('/auth/login-wallet', async (c) => {
   }
 });
 
-// Auth via Privy - endpoints removed (using Privy SDK client-side)
+// POST /auth/login-privy
+app.post('/auth/login-privy', async (c) => {
+  try {
+    const { privyId, email, walletAddress, displayName } = await c.req.json();
+    
+    if (!privyId) {
+      return c.json({ error: 'privyId required' }, 400);
+    }
+    
+    // Find or create user by Privy ID
+    let user = await prisma.user.findUnique({
+      where: { privyId }
+    });
+    
+    if (!user) {
+      user = await prisma.user.create({
+        data: {
+          privyId,
+          email,
+          walletAddress,
+          displayName,
+          lastLoginAt: new Date(),
+        }
+      });
+    } else {
+      // Update user info on login
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: { 
+          email: email || user.email,
+          walletAddress: walletAddress || user.walletAddress,
+          displayName: displayName || user.displayName,
+          lastLoginAt: new Date() 
+        }
+      });
+    }
+    
+    // Generate session token (valid for 30 days)
+    const sessionToken = generateSessionToken();
+    const sessionExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { sessionToken, sessionExpiry }
+    });
+    
+    return c.json({
+      ok: true,
+      user: {
+        id: user.id,
+        privyId: user.privyId,
+        walletAddress: user.walletAddress,
+        email: user.email,
+        displayName: user.displayName,
+      },
+      sessionToken,
+      expiresAt: sessionExpiry.toISOString(),
+    });
+  } catch (e: any) {
+    console.error('Privy login error:', e);
+    return c.json({ error: e.message }, 500);
+  }
+});
 
 // GET /auth/me
 app.get('/auth/me', async (c) => {
