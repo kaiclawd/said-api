@@ -1868,6 +1868,8 @@ app.patch('/auth/me', async (c) => {
     const body = await c.req.json();
     const { displayName, username, avatarUrl } = body;
     
+    console.log('[PATCH /auth/me] User:', user.id, 'Updating:', { displayName, username, avatarUrl: avatarUrl ? 'yes' : 'no' });
+    
     // Build update data
     const updateData: any = {};
     if (displayName !== undefined) updateData.displayName = displayName;
@@ -1883,11 +1885,21 @@ app.patch('/auth/me', async (c) => {
       updateData.avatarUrl = avatarUrl;
     }
     
+    console.log('[PATCH /auth/me] updateData:', updateData);
+    
     // Update user in database
     const updatedUser = await prisma.user.update({
       where: { id: user.id },
       data: updateData,
     });
+    
+    console.log('[PATCH /auth/me] Updated user:', { id: updatedUser.id, displayName: updatedUser.displayName, username: updatedUser.username });
+    
+    // Verify the update persisted by re-fetching
+    const verifyUser = await prisma.user.findUnique({
+      where: { id: user.id },
+    });
+    console.log('[PATCH /auth/me] Verification query:', { displayName: verifyUser?.displayName, username: verifyUser?.username });
     
     return c.json({
       ok: true,
