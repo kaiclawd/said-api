@@ -1920,6 +1920,30 @@ app.patch('/auth/me', async (c) => {
   }
 });
 
+// GET /auth/check-username - Check if username is available
+app.get('/auth/check-username', async (c) => {
+  try {
+    const username = c.req.query('username');
+    
+    if (!username) {
+      return c.json({ error: 'Username is required' }, 400);
+    }
+
+    // Check if username is taken
+    const existing = await prisma.user.findUnique({
+      where: { username },
+    });
+
+    return c.json({ 
+      available: !existing,
+      username,
+    });
+  } catch (e: any) {
+    console.error('Check username error:', e);
+    return c.json({ error: e.message }, 500);
+  }
+});
+
 // GET /users/me/agents
 app.get('/users/me/agents', async (c) => {
   const user = await verifySession(c.req.header('Authorization'));
