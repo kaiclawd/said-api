@@ -1795,13 +1795,14 @@ app.post('/auth/login-privy', async (c) => {
         }
       });
     } else {
-      // Update user info on login
+      // Update user info on login (but preserve displayName if already set)
       user = await prisma.user.update({
         where: { id: user.id },
         data: { 
           email: email || user.email,
           walletAddress: walletAddress || user.walletAddress,
-          displayName: displayName || user.displayName,
+          // Only update displayName if user doesn't have one yet
+          displayName: user.displayName || displayName,
           lastLoginAt: new Date() 
         }
       });
