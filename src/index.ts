@@ -1876,12 +1876,12 @@ app.patch('/auth/me', async (c) => {
     if (displayName !== undefined) updateData.displayName = displayName;
     if (username !== undefined) updateData.username = username;
     if (avatarUrl !== undefined) {
-      // Validate avatar is a data URL and not too large (max 500KB base64)
-      if (avatarUrl && !avatarUrl.startsWith('data:image/')) {
-        return c.json({ error: 'Invalid avatar format' }, 400);
-      }
-      if (avatarUrl && avatarUrl.length > 700000) {
-        return c.json({ error: 'Avatar too large (max 500KB)' }, 400);
+      // Accept both data URLs and regular URLs
+      if (avatarUrl) {
+        // If it's a data URL, check size
+        if (avatarUrl.startsWith('data:image/') && avatarUrl.length > 700000) {
+          return c.json({ error: 'Avatar too large (max 500KB)' }, 400);
+        }
       }
       updateData.avatarUrl = avatarUrl;
     }
