@@ -2173,6 +2173,171 @@ app.get('/admin/delete-agent/:id', async (c) => {
   return c.json({ ok: true, deleted: id });
 });
 
+// ============ NETWORK & BATCH ENDPOINTS ============
+
+// Batch verify: check multiple wallets at once
+// Useful for platforms that need to verify many agents in a single call
+app.post('/api/verify/batch', async (c) => {
+  const body = await c.req.json();
+  const { wallets } = body;
+  
+  if (!wallets || !Array.isArray(wallets) || wallets.length === 0) {
+    return c.json({ error: 'Request body must include "wallets" array' }, 400);
+  }
+  
+  if (wallets.length > 100) {
+    return c.json({ error: 'Maximum 100 wallets per batch request' }, 400);
+  }
+  
+  const agents = await prisma.agent.findMany({
+    where: { wallet: { in: wallets } },
+    select: {
+      wallet: true,
+      name: true,
+      isVerified: true,
+      reputationScore: true,
+    }
+  });
+  
+  const agentMap = new Map(agents.map(a => [a.wallet, a]));
+  
+  const results = wallets.map(wallet => {
+    const agent = agentMap.get(wallet);
+    return {
+      wallet,
+      registered: !!agent,
+      verified: agent?.isVerified || false,
+      name: agent?.name || null,
+      reputationScore: agent?.reputationScore || null,
+    };
+  });
+  
+  return c.json({
+    results,
+    summary: {
+      total: wallets.length,
+      registered: results.filter(r => r.registered).length,
+      verified: results.filter(r => r.verified).length,
+    }
+  });
+});
+
+// Agent feedback network: who rated whom
+// Returns edges for building a trust graph visualization
+app.get('/api/network', async (c) => {
+  const { verified, minScore, limit } = c.req.query();
+  
+  const where: any = {};
+  if (minScore) {
+    where.score = { gte: parseInt(minScore) };
+  }
+  
+  const feedback = await prisma.feedback.findMany({
+    where,
+    select: {
+      fromWallet: true,
+      toWallet: true,
+      score: true,
+      weight: true,
+      fromIsVerified: true,
+      createdAt: true,
+    },
+    orderBy: { createdAt: 'desc' },
+    take: Math.min(parseInt(limit || '500'), 1000),
+  });
+  
+  // Get unique wallets involved
+  const walletSet = new Set<string>();
+  feedback.forEach(f => {
+    walletSet.add(f.fromWallet);
+    walletSet.add(f.toWallet);
+  });
+  
+  // Fetch agent info for all involved wallets
+  const agentFilter: any = { wallet: { in: Array.from(walletSet) } };
+  if (verified === 'true') {
+    agentFilter.isVerified = true;
+  }
+  
+  const agents = await prisma.agent.findMany({
+    where: { wallet: { in: Array.from(walletSet) } },
+    select: {
+      wallet: true,
+      name: true,
+      isVerified: true,
+      reputationScore: true,
+    }
+  });
+  
+  const nodes = agents.map(a => ({
+    id: a.wallet,
+    name: a.name,
+    verified: a.isVerified,
+    reputation: a.reputationScore,
+  }));
+  
+  const edges = feedback.map(f => ({
+    from: f.fromWallet,
+    to: f.toWallet,
+    score: f.score,
+    weight: f.weight,
+    verifiedSource: f.fromIsVerified,
+    timestamp: f.createdAt,
+  }));
+  
+  return c.json({
+    nodes,
+    edges,
+    stats: {
+      totalNodes: nodes.length,
+      totalEdges: edges.length,
+      verifiedNodes: nodes.filter(n => n.verified).length,
+    }
+  });
+});
+
+// Agent activity timeline: all feedback given and received
+app.get('/api/agents/:wallet/activity', async (c) => {
+  const wallet = c.req.param('wallet');
+  const { limit, offset } = c.req.query();
+  
+  const agent = await prisma.agent.findUnique({ where: { wallet } });
+  if (!agent) {
+    return c.json({ error: 'Agent not found' }, 404);
+  }
+  
+  const [given, received] = await Promise.all([
+    prisma.feedback.findMany({
+      where: { fromWallet: wallet },
+      orderBy: { createdAt: 'desc' },
+      take: Math.min(parseInt(limit || '50'), 100),
+      skip: parseInt(offset || '0'),
+    }),
+    prisma.feedback.findMany({
+      where: { toWallet: wallet },
+      orderBy: { createdAt: 'desc' },
+      take: Math.min(parseInt(limit || '50'), 100),
+      skip: parseInt(offset || '0'),
+    }),
+  ]);
+  
+  // Merge and sort by timestamp
+  const activity = [
+    ...given.map(f => ({ type: 'feedback_given' as const, ...f })),
+    ...received.map(f => ({ type: 'feedback_received' as const, ...f })),
+  ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  
+  return c.json({
+    wallet,
+    name: agent.name,
+    activity,
+    counts: {
+      feedbackGiven: given.length,
+      feedbackReceived: received.length,
+    }
+  });
+});
+
 // ============ START ============
 
 const port = parseInt(process.env.PORT || '3001');
