@@ -2172,8 +2172,10 @@ app.post('/admin/feedback', async (c) => {
   if (!targetAgent) return c.json({ error: 'Agent not found' }, 404);
   const fromAgent = await prisma.agent.findUnique({ where: { wallet: fromWallet } });
   const weight = fromAgent?.isVerified ? 2.0 : 1.5;
-  const feedback = await prisma.feedback.create({
-    data: { fromWallet, toWallet, score, comment, weight, signature: `trusted:saidprotocol:${Date.now()}`, fromIsVerified: true }
+  const feedback = await prisma.feedback.upsert({
+    where: { fromWallet_toWallet: { fromWallet, toWallet } },
+    create: { fromWallet, toWallet, score, comment, weight, signature: `trusted:saidprotocol:${Date.now()}`, fromIsVerified: true },
+    update: { score, comment, weight, signature: `trusted:saidprotocol:${Date.now()}` }
   });
   return c.json({ ok: true, feedback });
 });
