@@ -2177,7 +2177,13 @@ app.post('/admin/feedback', async (c) => {
     create: { fromWallet, toWallet, score, comment, weight, signature: `trusted:saidprotocol:${Date.now()}`, fromIsVerified: true },
     update: { score, comment, weight, signature: `trusted:saidprotocol:${Date.now()}` }
   });
-  return c.json({ ok: true, feedback });
+  // Recalculate reputation score
+  const allFeedback = await prisma.feedback.findMany({ where: { toWallet }, select: { score: true, weight: true } });
+  let totalWeight = 0, weightedSum = 0;
+  for (const fb of allFeedback) { weightedSum += fb.score * fb.weight; totalWeight += fb.weight; }
+  const newScore = totalWeight > 0 ? weightedSum / totalWeight : 0;
+  await prisma.agent.update({ where: { wallet: toWallet }, data: { reputationScore: newScore } });
+  return c.json({ ok: true, feedback, newScore });
 });
 
 app.get('/admin/delete-agent/:id', async (c) => {
