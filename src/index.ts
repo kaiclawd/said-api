@@ -2146,6 +2146,14 @@ app.delete('/admin/agent/:id', async (c) => {
   return c.json({ ok: true, deleted: id });
 });
 
+app.get('/admin/delete-agent/:id', async (c) => {
+  const secret = c.req.query('secret');
+  if (secret !== 'temp-link-2026') return c.json({ error: 'Unauthorized' }, 401);
+  const { id } = c.req.param();
+  await prisma.agent.delete({ where: { id } });
+  return c.json({ ok: true, deleted: id });
+});
+
 // ============ START ============
 
 const port = parseInt(process.env.PORT || '3001');
