@@ -2165,6 +2165,19 @@ app.get('/admin/grants', async (c) => {
   return c.json({ applications });
 });
 
+app.post('/admin/feedback', async (c) => {
+  const { secret, fromWallet, toWallet, score, comment } = await c.req.json();
+  if (secret !== 'temp-link-2026') return c.json({ error: 'Unauthorized' }, 401);
+  const targetAgent = await prisma.agent.findUnique({ where: { wallet: toWallet } });
+  if (!targetAgent) return c.json({ error: 'Agent not found' }, 404);
+  const fromAgent = await prisma.agent.findUnique({ where: { wallet: fromWallet } });
+  const weight = fromAgent?.isVerified ? 2.0 : 1.5;
+  const feedback = await prisma.feedback.create({
+    data: { fromWallet, toWallet, score, comment, weight, signature: `trusted:saidprotocol:${Date.now()}`, fromIsVerified: true }
+  });
+  return c.json({ ok: true, feedback });
+});
+
 app.get('/admin/delete-agent/:id', async (c) => {
   const secret = c.req.query('secret');
   if (secret !== 'temp-link-2026') return c.json({ error: 'Unauthorized' }, 401);
