@@ -177,6 +177,26 @@ model UserAgent {
   @@index([agentWallet])
 }
 
+model GrantApplication {
+  id               String   @id @default(cuid())
+  agentName        String
+  walletAddress    String
+  twitter          String?
+  website          String?
+  description      String
+  useCase          String
+  fundingAmount    String
+  fundingDuration  String
+  milestones       String
+  teamBackground   String?
+  status           String   @default("pending")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([walletAddress])
+  @@index([status])
+}
+
 model EmailOTP {
   id              String    @id @default(cuid())
   email           String

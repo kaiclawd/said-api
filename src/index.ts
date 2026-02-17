@@ -2146,6 +2146,25 @@ app.delete('/admin/agent/:id', async (c) => {
   return c.json({ ok: true, deleted: id });
 });
 
+app.post('/api/grants/apply', async (c) => {
+  const body = await c.req.json();
+  const { agentName, walletAddress, twitter, website, description, useCase, fundingAmount, fundingDuration, milestones, teamBackground } = body;
+  if (!agentName || !walletAddress || !description || !useCase || !fundingAmount || !milestones) {
+    return c.json({ error: 'Missing required fields' }, 400);
+  }
+  const application = await prisma.grantApplication.create({
+    data: { agentName, walletAddress, twitter, website, description, useCase, fundingAmount, fundingDuration: fundingDuration || '3', milestones, teamBackground }
+  });
+  return c.json({ ok: true, id: application.id });
+});
+
+app.get('/admin/grants', async (c) => {
+  const secret = c.req.query('secret');
+  if (secret !== 'temp-link-2026') return c.json({ error: 'Unauthorized' }, 401);
+  const applications = await prisma.grantApplication.findMany({ orderBy: { createdAt: 'desc' } });
+  return c.json({ applications });
+});
+
 app.get('/admin/delete-agent/:id', async (c) => {
   const secret = c.req.query('secret');
   if (secret !== 'temp-link-2026') return c.json({ error: 'Unauthorized' }, 401);
