@@ -32,6 +32,11 @@ model Agent {
   serviceTypes  String[]  @default([])
   skills        String[]  @default([])
   
+  // Layer 2 verification (endpoint challenge-response)
+  layer2Verified      Boolean  @default(false)
+  layer2VerifiedAt    DateTime?
+  verifiedEndpointUrl String?
+
   // Reputation
   reputationScore Float   @default(0)
   feedbackCount   Int     @default(0)
@@ -195,6 +200,20 @@ model GrantApplication {
 
   @@index([walletAddress])
   @@index([status])
+}
+
+model AgentChallenge {
+  id          String   @id @default(cuid())
+  wallet      String
+  nonce       String   @unique
+  endpointUrl String
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime
+  verified    Boolean  @default(false)
+  verifiedAt  DateTime?
+
+  @@index([wallet])
+  @@index([nonce])
 }
 
 model EmailOTP {

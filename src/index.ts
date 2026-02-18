@@ -1217,6 +1217,100 @@ app.get('/api/verify/:wallet', async (c) => {
   });
 });
 
+// ============ LAYER 2 VERIFICATION ============
+
+/**
+ * GET /api/verify/layer2/challenge/:wallet?endpoint=<url>
+ * Generate a challenge nonce for Layer 2 agent verification.
+ * Agent must sign the nonce with their wallet private key.
+ */
+app.get('/api/verify/layer2/challenge/:wallet', async (c) => {
+  const wallet = c.req.param('wallet');
+  const endpointUrl = c.req.query('endpoint');
+  if (!endpointUrl) return c.json({ error: 'endpoint query param required' }, 400);
+
+  const agent = await prisma.agent.findUnique({ where: { wallet } });
+  if (!agent) return c.json({ error: 'Agent not found' }, 404);
+  if (!agent.isVerified) return c.json({ error: 'Layer 1 verification required first' }, 403);
+  if (agent.layer2Verified) return c.json({ error: 'Already Layer 2 verified', layer2Verified: true }, 400);
+
+  const crypto = await import('crypto');
+  const nonce = crypto.randomBytes(32).toString('hex');
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+  const challenge = await prisma.agentChallenge.create({
+    data: { wallet, nonce, endpointUrl, expiresAt },
+  });
+
+  return c.json({
+    challengeId: challenge.id,
+    nonce,
+    expiresAt,
+    wallet,
+    endpointUrl,
+    instructions: 'Sign the nonce string with your agent wallet private key using Ed25519, encode as base58, then POST to /api/verify/layer2/verify with { challengeId, signature }',
+  });
+});
+
+/**
+ * POST /api/verify/layer2/verify
+ * Complete Layer 2 verification by submitting signed challenge.
+ * Body: { challengeId, signature } where signature is base58-encoded Ed25519 sig of nonce
+ */
+app.post('/api/verify/layer2/verify', async (c) => {
+  const { challengeId, signature } = await c.req.json();
+  if (!challengeId || !signature) return c.json({ error: 'challengeId and signature required' }, 400);
+
+  const challenge = await prisma.agentChallenge.findUnique({ where: { id: challengeId } });
+  if (!challenge) return c.json({ error: 'Challenge not found' }, 404);
+  if (challenge.verified) return c.json({ error: 'Challenge already used' }, 400);
+  if (new Date() > challenge.expiresAt) return c.json({ error: 'Challenge expired' }, 400);
+
+  const agent = await prisma.agent.findUnique({ where: { wallet: challenge.wallet } });
+  if (!agent) return c.json({ error: 'Agent not found' }, 404);
+
+  // Verify Ed25519 signature: agent signed the nonce with their wallet key
+  const nonceBytes = new TextEncoder().encode(challenge.nonce);
+  let signatureBytes: Uint8Array;
+  let publicKeyBytes: Uint8Array;
+  try {
+    signatureBytes = bs58.decode(signature);
+    publicKeyBytes = bs58.decode(challenge.wallet);
+  } catch {
+    return c.json({ error: 'Invalid signature or wallet encoding' }, 400);
+  }
+
+  const valid = nacl.sign.detached.verify(nonceBytes, signatureBytes, publicKeyBytes);
+  if (!valid) return c.json({ error: 'Signature verification failed' }, 401);
+
+  // Mark verified
+  await prisma.agentChallenge.update({ where: { id: challengeId }, data: { verified: true, verifiedAt: new Date() } });
+  await prisma.agent.update({
+    where: { wallet: challenge.wallet },
+    data: { layer2Verified: true, layer2VerifiedAt: new Date(), verifiedEndpointUrl: challenge.endpointUrl },
+  });
+
+  return c.json({ ok: true, wallet: challenge.wallet, message: 'Layer 2 verification complete. Agent endpoint verified.' });
+});
+
+/**
+ * GET /api/verify/layer2/status/:wallet
+ */
+app.get('/api/verify/layer2/status/:wallet', async (c) => {
+  const wallet = c.req.param('wallet');
+  const agent = await prisma.agent.findUnique({ where: { wallet } });
+  if (!agent) return c.json({ error: 'Agent not found' }, 404);
+  return c.json({
+    wallet,
+    layer1Verified: agent.isVerified,
+    layer2Verified: agent.layer2Verified,
+    layer2VerifiedAt: agent.layer2VerifiedAt,
+    verifiedEndpointUrl: agent.verifiedEndpointUrl,
+  });
+});
+
+// ============ END LAYER 2 VERIFICATION ============
+
 /**
  * GET /api/agents/:wallet/payments
  * Get payment configuration for an agent (x402, etc.)
@@ -2163,6 +2257,25 @@ app.get('/admin/grants', async (c) => {
   if (secret !== 'temp-link-2026') return c.json({ error: 'Unauthorized' }, 401);
   const applications = await prisma.grantApplication.findMany({ orderBy: { createdAt: 'desc' } });
   return c.json({ applications });
+});
+
+const checkAdminAuth = (c: any): boolean => {
+  const secret = c.req.query('secret') || c.req.header('x-admin-secret');
+  return secret === (process.env.ADMIN_SECRET || 'temp-link-2026');
+};
+
+app.post('/admin/grants/:id/approve', async (c) => {
+  if (!checkAdminAuth(c)) return c.json({ error: 'Unauthorized' }, 401);
+  const { id } = c.req.param();
+  const application = await prisma.grantApplication.update({ where: { id }, data: { status: 'approved' } });
+  return c.json({ ok: true, application });
+});
+
+app.post('/admin/grants/:id/reject', async (c) => {
+  if (!checkAdminAuth(c)) return c.json({ error: 'Unauthorized' }, 401);
+  const { id } = c.req.param();
+  const application = await prisma.grantApplication.update({ where: { id }, data: { status: 'rejected' } });
+  return c.json({ ok: true, application });
 });
 
 app.post('/admin/feedback', async (c) => {
