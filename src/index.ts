@@ -1492,7 +1492,7 @@ app.get('/api/passport/:wallet/metadata', async (c) => {
     name: `${agent.name || 'Agent'} — SAID Passport`,
     symbol: 'SAID',
     description: 'Soulbound AI agent identity passport. Issued by SAID Protocol on Solana. Non-transferable.',
-    image: 'https://www.saidprotocol.com/logo.png',
+    image: 'https://www.saidprotocol.com/logo-dark.png',
     external_url: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
     attributes: [
       { trait_type: 'Protocol', value: 'SAID' },
@@ -1506,7 +1506,7 @@ app.get('/api/passport/:wallet/metadata', async (c) => {
     ],
     properties: {
       category: 'image',
-      files: [{ uri: 'https://www.saidprotocol.com/logo.png', type: 'image/png' }],
+      files: [{ uri: 'https://www.saidprotocol.com/logo-dark.png', type: 'image/png' }],
     },
     extensions: {
       standard: 'said-passport-v1',
