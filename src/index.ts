@@ -763,12 +763,17 @@ app.get('/api/register/sponsored/status', async (c) => {
  */
 app.post('/api/register/pending', async (c) => {
   const body = await c.req.json();
-  const { wallet, name, description, twitter, website, capabilities } = body;
+  const { wallet, name, description, twitter, website, capabilities, source } = body;
   
   // Validate required fields
   if (!wallet || !name) {
     return c.json({ error: 'Required: wallet, name' }, 400);
   }
+
+  // Determine if this source qualifies for auto L2 framework attestation
+  const FRAMEWORK_SOURCES = ['eliza', 'swarms', 'conway', 'sdk', 'cli'];
+  const registrationSource = source || 'website';
+  const isFrameworkAttestation = FRAMEWORK_SOURCES.includes(registrationSource.toLowerCase());
   
   // Check if already registered
   const existing = await prisma.agent.findUnique({ where: { wallet } });
@@ -831,6 +836,13 @@ app.post('/api/register/pending', async (c) => {
         twitter: card.twitter,
         website: card.website,
         skills: card.capabilities,
+        registrationSource,
+        // Auto L2 attest framework registrations
+        ...(isFrameworkAttestation && {
+          layer2Verified: true,
+          layer2VerifiedAt: new Date(),
+          l2AttestationMethod: 'framework',
+        }),
       }
     });
     
@@ -843,6 +855,8 @@ app.post('/api/register/pending', async (c) => {
       metadataUri,
       profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
       badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
+      layer2Verified: isFrameworkAttestation,
+      l2AttestationMethod: isFrameworkAttestation ? 'framework' : null,
       upgrade: {
         cost: '0.005 SOL',
         instructions: 'Fund wallet and run: npx said-anchor'
@@ -1287,10 +1301,10 @@ app.post('/api/verify/layer2/verify', async (c) => {
   await prisma.agentChallenge.update({ where: { id: challengeId }, data: { verified: true, verifiedAt: new Date() } });
   await prisma.agent.update({
     where: { wallet: challenge.wallet },
-    data: { layer2Verified: true, layer2VerifiedAt: new Date(), verifiedEndpointUrl: challenge.endpointUrl },
+    data: { layer2Verified: true, layer2VerifiedAt: new Date(), verifiedEndpointUrl: challenge.endpointUrl, l2AttestationMethod: 'endpoint' },
   });
 
-  return c.json({ ok: true, wallet: challenge.wallet, message: 'Layer 2 verification complete. Agent endpoint verified.' });
+  return c.json({ ok: true, wallet: challenge.wallet, message: 'Layer 2 verification complete. Agent endpoint verified.', l2AttestationMethod: 'endpoint' });
 });
 
 /**
@@ -1300,12 +1314,59 @@ app.get('/api/verify/layer2/status/:wallet', async (c) => {
   const wallet = c.req.param('wallet');
   const agent = await prisma.agent.findUnique({ where: { wallet } });
   if (!agent) return c.json({ error: 'Agent not found' }, 404);
+
+  // Check activity-based L2 eligibility (30+ days old, 50+ activity)
+  const ageMs = Date.now() - new Date(agent.registeredAt).getTime();
+  const ageDays = ageMs / (1000 * 60 * 60 * 24);
+  const activityEligible = ageDays >= 30 && (agent.activityCount || 0) >= 50;
+
+  // Auto-upgrade to L2 via activity if eligible and not already L2
+  if (!agent.layer2Verified && activityEligible) {
+    await prisma.agent.update({
+      where: { wallet },
+      data: { layer2Verified: true, layer2VerifiedAt: new Date(), l2AttestationMethod: 'activity' },
+    });
+    agent.layer2Verified = true;
+    agent.layer2VerifiedAt = new Date();
+    (agent as any).l2AttestationMethod = 'activity';
+  }
+
   return c.json({
     wallet,
     layer1Verified: agent.isVerified,
     layer2Verified: agent.layer2Verified,
     layer2VerifiedAt: agent.layer2VerifiedAt,
+    l2AttestationMethod: (agent as any).l2AttestationMethod || null,
     verifiedEndpointUrl: agent.verifiedEndpointUrl,
+    registrationSource: (agent as any).registrationSource || null,
+    activityCount: (agent as any).activityCount || 0,
+    ageDays: Math.floor(ageDays),
+    activityEligible,
+  });
+});
+
+/**
+ * POST /api/verify/layer2/activity/:wallet
+ * Increment activity count for an agent (called by framework integrations)
+ */
+app.post('/api/verify/layer2/activity/:wallet', async (c) => {
+  const wallet = c.req.param('wallet');
+  const agent = await prisma.agent.findUnique({ where: { wallet } });
+  if (!agent) return c.json({ error: 'Agent not found' }, 404);
+
+  const updated = await prisma.agent.update({
+    where: { wallet },
+    data: {
+      activityCount: { increment: 1 },
+      lastActiveAt: new Date(),
+    },
+  });
+
+  return c.json({
+    ok: true,
+    wallet,
+    activityCount: updated.activityCount,
+    lastActiveAt: updated.lastActiveAt,
   });
 });
 
