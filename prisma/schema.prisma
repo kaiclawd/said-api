@@ -32,6 +32,11 @@ model Agent {
   serviceTypes  String[]  @default([])
   skills        String[]  @default([])
   
+  // SAID Passport (soulbound Token-2022 NFT)
+  passportMint          String?   // mint address of the soulbound NFT
+  passportMintedAt      DateTime?
+  passportTxHash        String?
+
   // Layer 2 verification (multi-path)
   layer2Verified        Boolean  @default(false)
   layer2VerifiedAt      DateTime?

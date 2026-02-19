@@ -2,7 +2,17 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { serve } from '@hono/node-server';
 import { PrismaClient } from '@prisma/client';
-import { Connection, PublicKey } from '@solana/web3.js';
+import { Connection, PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } from '@solana/web3.js';
+import {
+  TOKEN_2022_PROGRAM_ID,
+  createInitializeMintInstruction,
+  createInitializeNonTransferableMintInstruction,
+  createAssociatedTokenAccountInstruction,
+  createMintToInstruction,
+  getAssociatedTokenAddressSync,
+  getMintLen,
+  ExtensionType,
+} from '@solana/spl-token';
 import { config } from 'dotenv';
 import nacl from 'tweetnacl';
 import bs58 from 'bs58';
@@ -1371,6 +1381,264 @@ app.post('/api/verify/layer2/activity/:wallet', async (c) => {
 });
 
 // ============ END LAYER 2 VERIFICATION ============
+
+// ============ SAID PASSPORT ============
+
+const PASSPORT_PRICE_SOL = 0.05;
+const SAID_TREASURY_WALLET = process.env.SAID_TREASURY_WALLET || '72onvrQJZkPGLAhWK5MeYc73iyM72P2ABKzDMQ4NpQBL';
+
+/**
+ * GET /api/passport/:wallet/image
+ * Dynamic SVG passport card for an agent
+ */
+app.get('/api/passport/:wallet/image', async (c) => {
+  const wallet = c.req.param('wallet');
+  const agent = await prisma.agent.findUnique({ where: { wallet } });
+  if (!agent) return c.json({ error: 'Agent not found' }, 404);
+
+  const score = Math.round(agent.reputationScore || 0);
+  const color = score >= 70 ? '#10b981' : score >= 40 ? '#f59e0b' : '#6b7280';
+  const short = wallet.slice(0, 4) + '...' + wallet.slice(-4);
+  const date = new Date(agent.registeredAt).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+  const l2Method = (agent as any).l2AttestationMethod;
+  const hasMinted = !!(agent as any).passportMint;
+  const tier = score >= 70 ? 'VERIFIED' : score >= 40 ? 'ACTIVE' : 'REGISTERED';
+  const name = agent.name || 'Unknown Agent';
+
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="480" height="280" viewBox="0 0 480 280">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0a0a0f"/>
+      <stop offset="100%" style="stop-color:#111128"/>
+    </linearGradient>
+    <linearGradient id="border" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#3b3b6b"/>
+      <stop offset="100%" style="stop-color:#1e1e3f"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  
+  <!-- Background -->
+  <rect width="480" height="280" rx="16" fill="url(#bg)"/>
+  <rect width="480" height="280" rx="16" fill="none" stroke="url(#border)" stroke-width="1.5"/>
+  
+  <!-- Top strip -->
+  <rect width="480" height="4" rx="0" fill="${color}" opacity="0.8"/>
+  
+  <!-- SAID hex logo -->
+  <g transform="translate(32, 28)" filter="url(#glow)">
+    <polygon points="18,0 34,9 34,27 18,36 2,27 2,9" fill="none" stroke="${color}" stroke-width="2"/>
+    <polygon points="18,7 27,12 27,24 18,29 9,24 9,12" fill="none" stroke="${color}" stroke-width="1" opacity="0.5"/>
+    <circle cx="18" cy="9" r="2.5" fill="${color}"/>
+    <circle cx="27" cy="24" r="2.5" fill="${color}"/>
+    <circle cx="9" cy="24" r="2.5" fill="${color}"/>
+  </g>
+  
+  <!-- SAID PASSPORT label -->
+  <text x="80" y="40" font-family="monospace" font-size="10" fill="${color}" letter-spacing="4" font-weight="bold">SAID PASSPORT</text>
+  <text x="80" y="56" font-family="monospace" font-size="8" fill="#4b4b7f" letter-spacing="2">SOLANA AGENT IDENTITY</text>
+  
+  <!-- Agent name -->
+  <text x="32" y="110" font-family="monospace" font-size="22" fill="#ffffff" font-weight="bold">${name.length > 20 ? name.slice(0, 20) + '…' : name}</text>
+  
+  <!-- Wallet -->
+  <text x="32" y="135" font-family="monospace" font-size="11" fill="#6b6b9f">${short}</text>
+  
+  <!-- Divider -->
+  <line x1="32" y1="150" x2="448" y2="150" stroke="#1e1e3f" stroke-width="1"/>
+  
+  <!-- Stats row -->
+  <text x="32" y="175" font-family="monospace" font-size="9" fill="#4b4b7f" letter-spacing="2">REPUTATION</text>
+  <text x="32" y="192" font-family="monospace" font-size="20" fill="${color}" font-weight="bold">${score}</text>
+  <text x="72" y="192" font-family="monospace" font-size="11" fill="#4b4b7f">/100</text>
+  
+  <text x="160" y="175" font-family="monospace" font-size="9" fill="#4b4b7f" letter-spacing="2">TIER</text>
+  <text x="160" y="192" font-family="monospace" font-size="13" fill="#ffffff" font-weight="bold">${tier}</text>
+  
+  <text x="280" y="175" font-family="monospace" font-size="9" fill="#4b4b7f" letter-spacing="2">REGISTERED</text>
+  <text x="280" y="192" font-family="monospace" font-size="11" fill="#ffffff">${date}</text>
+  
+  <!-- L2 badge -->
+  ${l2Method ? `<rect x="32" y="215" width="120" height="22" rx="4" fill="${color}" opacity="0.15" stroke="${color}" stroke-width="1"/>
+  <text x="42" y="230" font-family="monospace" font-size="9" fill="${color}" font-weight="bold">⚡ L2: ${l2Method.toUpperCase()}</text>` : ''}
+  
+  <!-- Passport minted badge -->
+  ${hasMinted ? `<rect x="${l2Method ? '162' : '32'}" y="215" width="100" height="22" rx="4" fill="#7c3aed" opacity="0.15" stroke="#7c3aed" stroke-width="1"/>
+  <text x="${l2Method ? '172' : '42'}" y="230" font-family="monospace" font-size="9" fill="#a78bfa" font-weight="bold">◆ PASSPORT NFT</text>` : ''}
+  
+  <!-- Bottom -->
+  <text x="32" y="264" font-family="monospace" font-size="8" fill="#2b2b4f">saidprotocol.com</text>
+  <text x="380" y="264" font-family="monospace" font-size="8" fill="#2b2b4f">$SAID</text>
+</svg>`;
+
+  c.header('Content-Type', 'image/svg+xml');
+  c.header('Cache-Control', 'public, max-age=300');
+  return c.body(svg);
+});
+
+/**
+ * GET /api/passport/:wallet/metadata
+ * NFT metadata JSON for the soulbound passport
+ */
+app.get('/api/passport/:wallet/metadata', async (c) => {
+  const wallet = c.req.param('wallet');
+  const agent = await prisma.agent.findUnique({ where: { wallet } });
+  if (!agent) return c.json({ error: 'Agent not found' }, 404);
+
+  return c.json({
+    name: `${agent.name || 'Agent'} — SAID Passport`,
+    symbol: 'SAID',
+    description: 'Soulbound AI agent identity passport. Issued by SAID Protocol on Solana. Non-transferable.',
+    image: `https://api.saidprotocol.com/api/passport/${wallet}/image`,
+    external_url: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+    attributes: [
+      { trait_type: 'Protocol', value: 'SAID' },
+      { trait_type: 'Wallet', value: wallet },
+      { trait_type: 'Reputation Score', value: Math.round(agent.reputationScore || 0) },
+      { trait_type: 'Verified', value: agent.isVerified ? 'true' : 'false' },
+      { trait_type: 'L2 Attestation', value: (agent as any).l2AttestationMethod || 'none' },
+      { trait_type: 'Registration Source', value: (agent as any).registrationSource || 'website' },
+      { trait_type: 'Registered At', value: agent.registeredAt.toISOString() },
+      { trait_type: 'Soulbound', value: 'true' },
+    ],
+    properties: {
+      category: 'image',
+      files: [{ uri: `https://api.saidprotocol.com/api/passport/${wallet}/image`, type: 'image/svg+xml' }],
+    },
+    extensions: {
+      standard: 'said-passport-v1',
+      soulbound: true,
+      protocol: 'SAID',
+    },
+  });
+});
+
+/**
+ * POST /api/passport/:wallet/prepare
+ * Build unsigned Token-2022 NonTransferable passport mint transaction
+ */
+app.post('/api/passport/:wallet/prepare', async (c) => {
+  const wallet = c.req.param('wallet');
+  const agent = await prisma.agent.findUnique({ where: { wallet } });
+  if (!agent) return c.json({ error: 'Agent not found' }, 404);
+  if (!agent.isVerified) return c.json({ error: 'Agent must be L1 verified to mint a passport' }, 403);
+  if ((agent as any).passportMint) return c.json({ error: 'Passport already minted', passportMint: (agent as any).passportMint }, 400);
+
+  try {
+    const ownerPubkey = new PublicKey(wallet);
+    const treasuryPubkey = new PublicKey(SAID_TREASURY_WALLET);
+
+    // Derive deterministic mint address using CreateWithSeed
+    const { createHash } = await import('crypto');
+    const seed = createHash('sha256').update(`said-passport-v1:${wallet}`).digest('hex').slice(0, 32);
+    const mintPubkey = await PublicKey.createWithSeed(ownerPubkey, seed, TOKEN_2022_PROGRAM_ID);
+
+    // Calculate space for NonTransferable mint
+    const mintLen = getMintLen([ExtensionType.NonTransferable]);
+    const mintLamports = await connection.getMinimumBalanceForRentExemption(mintLen);
+
+    // Get ATA address
+    const ata = getAssociatedTokenAddressSync(mintPubkey, ownerPubkey, false, TOKEN_2022_PROGRAM_ID);
+
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+    const tx = new Transaction({ recentBlockhash: blockhash, feePayer: ownerPubkey });
+
+    // 1. Treasury fee (0.05 SOL to SAID)
+    tx.add(SystemProgram.transfer({
+      fromPubkey: ownerPubkey,
+      toPubkey: treasuryPubkey,
+      lamports: PASSPORT_PRICE_SOL * LAMPORTS_PER_SOL,
+    }));
+
+    // 2. Create mint account with seed
+    tx.add(SystemProgram.createAccountWithSeed({
+      fromPubkey: ownerPubkey,
+      newAccountPubkey: mintPubkey,
+      basePubkey: ownerPubkey,
+      seed,
+      lamports: mintLamports,
+      space: mintLen,
+      programId: TOKEN_2022_PROGRAM_ID,
+    }));
+
+    // 3. Initialize NonTransferable extension
+    tx.add(createInitializeNonTransferableMintInstruction(mintPubkey, TOKEN_2022_PROGRAM_ID));
+
+    // 4. Initialize mint (0 decimals, owner is mint authority)
+    tx.add(createInitializeMintInstruction(mintPubkey, 0, ownerPubkey, null, TOKEN_2022_PROGRAM_ID));
+
+    // 5. Create ATA
+    tx.add(createAssociatedTokenAccountInstruction(ownerPubkey, ata, ownerPubkey, mintPubkey, TOKEN_2022_PROGRAM_ID));
+
+    // 6. Mint 1 token
+    tx.add(createMintToInstruction(mintPubkey, ata, ownerPubkey, 1, [], TOKEN_2022_PROGRAM_ID));
+
+    const serialized = tx.serialize({ requireAllSignatures: false, verifySignatures: false });
+
+    return c.json({
+      ok: true,
+      transaction: Buffer.from(serialized).toString('base64'),
+      mintAddress: mintPubkey.toString(),
+      ataAddress: ata.toString(),
+      priceSol: PASSPORT_PRICE_SOL,
+      metadataUrl: `https://api.saidprotocol.com/api/passport/${wallet}/metadata`,
+      lastValidBlockHeight,
+    });
+  } catch (err: any) {
+    console.error('Passport prepare error:', err);
+    return c.json({ error: 'Failed to build passport transaction: ' + err.message }, 500);
+  }
+});
+
+/**
+ * POST /api/passport/:wallet/finalize
+ * Confirm the passport mint landed on-chain and record it
+ */
+app.post('/api/passport/:wallet/finalize', async (c) => {
+  const wallet = c.req.param('wallet');
+  const body = await c.req.json() as { txHash: string; mintAddress: string };
+  const { txHash, mintAddress } = body;
+
+  if (!txHash || !mintAddress) return c.json({ error: 'Required: txHash, mintAddress' }, 400);
+
+  const agent = await prisma.agent.findUnique({ where: { wallet } });
+  if (!agent) return c.json({ error: 'Agent not found' }, 404);
+
+  // Verify tx landed on-chain
+  try {
+    const status = await connection.getSignatureStatus(txHash, { searchTransactionHistory: true });
+    if (!status?.value || status.value.err) {
+      return c.json({ error: 'Transaction not confirmed or failed on-chain' }, 400);
+    }
+  } catch (err: any) {
+    return c.json({ error: 'Could not verify transaction: ' + err.message }, 400);
+  }
+
+  await prisma.agent.update({
+    where: { wallet },
+    data: {
+      passportMint: mintAddress,
+      passportMintedAt: new Date(),
+      passportTxHash: txHash,
+    } as any,
+  });
+
+  return c.json({
+    ok: true,
+    wallet,
+    passportMint: mintAddress,
+    passportTxHash: txHash,
+    imageUrl: `https://api.saidprotocol.com/api/passport/${wallet}/image`,
+    metadataUrl: `https://api.saidprotocol.com/api/passport/${wallet}/metadata`,
+    profileUrl: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+    message: 'SAID Passport minted. Your on-chain identity is now permanent and portable.',
+  });
+});
+
+// ============ END SAID PASSPORT ============
 
 /**
  * GET /api/agents/:wallet/payments
