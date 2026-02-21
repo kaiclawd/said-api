@@ -1555,22 +1555,9 @@ app.post('/api/passport/:wallet/prepare', async (c) => {
     const seed = createHash('sha256').update(`said-passport-v1:${wallet}`).digest('hex').slice(0, 32);
     const mintPubkey = await PublicKey.createWithSeed(ownerPubkey, seed, TOKEN_2022_PROGRAM_ID);
 
-    // 1. Define metadata FIRST
-    const metadata: TokenMetadata = {
-      mint: mintPubkey,
-      name: `${agent.name || 'Agent'} - SAID Passport`,
-      symbol: 'PASSPORT',
-      uri: `https://api.saidprotocol.com/api/passport/${wallet}/metadata`,
-      additionalMetadata: [],
-    };
-
-    // 2. Calculate TOTAL space (mint + extensions + metadata)
+    // Calculate space for NonTransferable + MetadataPointer extensions (external metadata)
     const mintLen = getMintLen([ExtensionType.NonTransferable, ExtensionType.MetadataPointer]);
-    const metadataLen = pack(metadata).length;
-    const totalLen = mintLen + metadataLen;
-
-    // 3. Get rent for TOTAL size (space field uses mintLen, rent covers total)
-    const mintLamports = await connection.getMinimumBalanceForRentExemption(totalLen);
+    const mintLamports = await connection.getMinimumBalanceForRentExemption(mintLen);
 
     // Get ATA address
     const ata = getAssociatedTokenAddressSync(mintPubkey, ownerPubkey, false, TOKEN_2022_PROGRAM_ID);
@@ -1596,11 +1583,11 @@ app.post('/api/passport/:wallet/prepare', async (c) => {
       programId: TOKEN_2022_PROGRAM_ID,
     }));
 
-    // 3. Initialize MetadataPointer extension (points to mint itself for on-chain metadata)
+    // 3. Initialize MetadataPointer extension (points to external API metadata)
     tx.add(createInitializeMetadataPointerInstruction(
       mintPubkey,
       ownerPubkey,
-      mintPubkey, // Metadata stored in the mint account itself
+      null, // External metadata via URI (no on-chain metadata for now)
       TOKEN_2022_PROGRAM_ID
     ));
 
@@ -1610,22 +1597,10 @@ app.post('/api/passport/:wallet/prepare', async (c) => {
     // 5. Initialize mint (0 decimals, owner is mint authority)
     tx.add(createInitializeMintInstruction(mintPubkey, 0, ownerPubkey, null, TOKEN_2022_PROGRAM_ID));
 
-    // 6. Initialize on-chain metadata
-    tx.add(createInitializeInstruction({
-      programId: TOKEN_2022_PROGRAM_ID,
-      mint: mintPubkey,
-      metadata: mintPubkey,
-      name: metadata.name,
-      symbol: metadata.symbol,
-      uri: metadata.uri,
-      mintAuthority: ownerPubkey,
-      updateAuthority: ownerPubkey,
-    }));
-
-    // 7. Create ATA
+    // 6. Create ATA
     tx.add(createAssociatedTokenAccountInstruction(ownerPubkey, ata, ownerPubkey, mintPubkey, TOKEN_2022_PROGRAM_ID));
 
-    // 8. Mint 1 token
+    // 7. Mint 1 token
     tx.add(createMintToInstruction(mintPubkey, ata, ownerPubkey, 1, [], TOKEN_2022_PROGRAM_ID));
 
     // Simulate transaction (log errors but don't block)
