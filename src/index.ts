@@ -1555,7 +1555,7 @@ app.post('/api/passport/:wallet/prepare', async (c) => {
     const seed = createHash('sha256').update(`said-passport-v1:${wallet}`).digest('hex').slice(0, 32);
     const mintPubkey = await PublicKey.createWithSeed(ownerPubkey, seed, TOKEN_2022_PROGRAM_ID);
 
-    // Prepare on-chain metadata
+    // 1. Define metadata FIRST
     const metadata: TokenMetadata = {
       mint: mintPubkey,
       name: `${agent.name || 'Agent'} - SAID Passport`,
@@ -1564,10 +1564,13 @@ app.post('/api/passport/:wallet/prepare', async (c) => {
       additionalMetadata: [],
     };
 
-    // Calculate space for NonTransferable + MetadataPointer + Metadata extensions
+    // 2. Calculate TOTAL space (mint + extensions + metadata)
+    const mintLen = getMintLen([ExtensionType.NonTransferable, ExtensionType.MetadataPointer]);
     const metadataLen = pack(metadata).length;
-    const mintLen = getMintLen([ExtensionType.NonTransferable, ExtensionType.MetadataPointer]) + metadataLen;
-    const mintLamports = await connection.getMinimumBalanceForRentExemption(mintLen);
+    const totalLen = mintLen + metadataLen;
+
+    // 3. Get rent for TOTAL size (space field uses mintLen, rent covers total)
+    const mintLamports = await connection.getMinimumBalanceForRentExemption(totalLen);
 
     // Get ATA address
     const ata = getAssociatedTokenAddressSync(mintPubkey, ownerPubkey, false, TOKEN_2022_PROGRAM_ID);
@@ -1624,6 +1627,23 @@ app.post('/api/passport/:wallet/prepare', async (c) => {
 
     // 8. Mint 1 token
     tx.add(createMintToInstruction(mintPubkey, ata, ownerPubkey, 1, [], TOKEN_2022_PROGRAM_ID));
+
+    // Simulate transaction to catch errors before sending to wallet
+    try {
+      const simulation = await connection.simulateTransaction(tx, { sigVerify: false });
+      if (simulation.value.err) {
+        console.error('Simulation error:', JSON.stringify(simulation.value.err));
+        console.error('Logs:', simulation.value.logs);
+        return c.json({ 
+          error: 'Transaction simulation failed', 
+          details: simulation.value.err,
+          logs: simulation.value.logs 
+        }, 400);
+      }
+    } catch (simErr: any) {
+      console.error('Simulation exception:', simErr);
+      // Continue anyway - simulation might fail but actual tx could work
+    }
 
     const serialized = tx.serialize({ requireAllSignatures: false, verifySignatures: false });
 
