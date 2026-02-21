@@ -7,6 +7,7 @@ import {
   TOKEN_2022_PROGRAM_ID,
   createInitializeMintInstruction,
   createInitializeNonTransferableMintInstruction,
+  createInitializeMetadataPointerInstruction,
   createAssociatedTokenAccountInstruction,
   createMintToInstruction,
   getAssociatedTokenAddressSync,
@@ -1546,8 +1547,8 @@ app.post('/api/passport/:wallet/prepare', async (c) => {
     const seed = createHash('sha256').update(`said-passport-v1:${wallet}`).digest('hex').slice(0, 32);
     const mintPubkey = await PublicKey.createWithSeed(ownerPubkey, seed, TOKEN_2022_PROGRAM_ID);
 
-    // Calculate space for NonTransferable mint
-    const mintLen = getMintLen([ExtensionType.NonTransferable]);
+    // Calculate space for NonTransferable + MetadataPointer extensions
+    const mintLen = getMintLen([ExtensionType.NonTransferable, ExtensionType.MetadataPointer]);
     const mintLamports = await connection.getMinimumBalanceForRentExemption(mintLen);
 
     // Get ATA address
@@ -1574,16 +1575,24 @@ app.post('/api/passport/:wallet/prepare', async (c) => {
       programId: TOKEN_2022_PROGRAM_ID,
     }));
 
-    // 3. Initialize NonTransferable extension
+    // 3. Initialize MetadataPointer extension (points to external metadata)
+    tx.add(createInitializeMetadataPointerInstruction(
+      mintPubkey,
+      ownerPubkey,
+      null, // Use external metadata via URI
+      TOKEN_2022_PROGRAM_ID
+    ));
+
+    // 4. Initialize NonTransferable extension
     tx.add(createInitializeNonTransferableMintInstruction(mintPubkey, TOKEN_2022_PROGRAM_ID));
 
-    // 4. Initialize mint (0 decimals, owner is mint authority)
+    // 5. Initialize mint (0 decimals, owner is mint authority)
     tx.add(createInitializeMintInstruction(mintPubkey, 0, ownerPubkey, null, TOKEN_2022_PROGRAM_ID));
 
-    // 5. Create ATA
+    // 6. Create ATA
     tx.add(createAssociatedTokenAccountInstruction(ownerPubkey, ata, ownerPubkey, mintPubkey, TOKEN_2022_PROGRAM_ID));
 
-    // 6. Mint 1 token
+    // 7. Mint 1 token
     tx.add(createMintToInstruction(mintPubkey, ata, ownerPubkey, 1, [], TOKEN_2022_PROGRAM_ID));
 
     const serialized = tx.serialize({ requireAllSignatures: false, verifySignatures: false });
