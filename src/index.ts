@@ -288,11 +288,19 @@ app.get('/api/agents/:wallet/feedback/message', async (c) => {
 // ============ TRUSTED SOURCE FEEDBACK ============
 
 // Trusted sources (platforms that can submit feedback without user signatures)
-const TRUSTED_SOURCES: Record<string, { name: string; weight: number }> = {
-  'torch_sk_live_7f8a9b2c3d4e5f6a7b8c9d0e': { name: 'torch-market', weight: 1.5 },
-  'solprism_sk_live_a1b2c3d4e5f6g7h8i9j0': { name: 'solprism', weight: 1.5 },
-  'agentdex_sk_live_x1y2z3a4b5c6d7e8f9g0': { name: 'agentdex', weight: 1.2 },
-};
+// API keys loaded from environment variables for security
+const TRUSTED_SOURCES: Record<string, { name: string; weight: number }> = {};
+
+// Load trusted source keys from environment variables
+if (process.env.TORCH_API_KEY) {
+  TRUSTED_SOURCES[process.env.TORCH_API_KEY] = { name: 'torch-market', weight: 1.5 };
+}
+if (process.env.SOLPRISM_API_KEY) {
+  TRUSTED_SOURCES[process.env.SOLPRISM_API_KEY] = { name: 'solprism', weight: 1.5 };
+}
+if (process.env.AGENTDEX_API_KEY) {
+  TRUSTED_SOURCES[process.env.AGENTDEX_API_KEY] = { name: 'agentdex', weight: 1.2 };
+}
 
 // Event type to score mapping
 const EVENT_SCORES: Record<string, number> = {
@@ -618,19 +626,21 @@ app.post('/api/register/sponsored', async (c) => {
     }, 409);
   }
   
-  // Verify signature if provided (optional but recommended)
-  if (signature && timestamp) {
-    const message = getRegistrationMessage(wallet, name, timestamp);
-    const isValid = verifySignature(message, signature, wallet);
-    
-    if (!isValid) {
-      return c.json({ error: 'Invalid signature' }, 401);
-    }
-    
-    // Timestamp must be within 10 minutes
-    if (Math.abs(Date.now() - timestamp) > 10 * 60 * 1000) {
-      return c.json({ error: 'Timestamp too old. Sign a fresh message.' }, 400);
-    }
+  // Verify signature (REQUIRED for security)
+  if (!signature || !timestamp) {
+    return c.json({ error: 'Signature and timestamp are required for registration' }, 400);
+  }
+  
+  const message = getRegistrationMessage(wallet, name, timestamp);
+  const isValid = verifySignature(message, signature, wallet);
+  
+  if (!isValid) {
+    return c.json({ error: 'Invalid signature' }, 401);
+  }
+  
+  // Timestamp must be within 10 minutes
+  if (Math.abs(Date.now() - timestamp) > 10 * 60 * 1000) {
+    return c.json({ error: 'Timestamp too old. Sign a fresh message.' }, 400);
   }
   
   try {
@@ -1737,19 +1747,21 @@ app.post('/api/attest', async (c) => {
     return c.json({ error: 'Subject not registered in SAID' }, 404);
   }
   
-  // If signature provided, verify it
-  if (signature && timestamp) {
-    const message = getAttestationMessage(attesterWallet, subjectWallet, attestationType, attestationConfidence, timestamp);
-    const isValid = verifySignature(message, signature, attesterWallet);
-    
-    if (!isValid) {
-      return c.json({ error: 'Invalid signature' }, 401);
-    }
-    
-    // Timestamp must be within 5 minutes
-    if (Math.abs(Date.now() - timestamp) > 5 * 60 * 1000) {
-      return c.json({ error: 'Timestamp too old' }, 400);
-    }
+  // Verify signature (REQUIRED for security)
+  if (!signature || !timestamp) {
+    return c.json({ error: 'Signature and timestamp are required for attestations' }, 400);
+  }
+  
+  const message = getAttestationMessage(attesterWallet, subjectWallet, attestationType, attestationConfidence, timestamp);
+  const isValid = verifySignature(message, signature, attesterWallet);
+  
+  if (!isValid) {
+    return c.json({ error: 'Invalid signature' }, 401);
+  }
+  
+  // Timestamp must be within 5 minutes
+  if (Math.abs(Date.now() - timestamp) > 5 * 60 * 1000) {
+    return c.json({ error: 'Timestamp too old' }, 400);
   }
   
   // Create or update attestation
@@ -1920,13 +1932,15 @@ app.delete('/api/attestations/:id', async (c) => {
     return c.json({ error: 'Only the attester can revoke' }, 403);
   }
   
-  // Verify signature if provided
-  if (signature && timestamp) {
-    const message = `SAID:revoke:${id}:${timestamp}`;
-    const isValid = verifySignature(message, signature, wallet);
-    if (!isValid) {
-      return c.json({ error: 'Invalid signature' }, 401);
-    }
+  // Verify signature (REQUIRED for security)
+  if (!signature || !timestamp) {
+    return c.json({ error: 'Signature and timestamp are required to revoke attestations' }, 400);
+  }
+  
+  const message = `SAID:revoke:${id}:${timestamp}`;
+  const isValid = verifySignature(message, signature, wallet);
+  if (!isValid) {
+    return c.json({ error: 'Invalid signature' }, 401);
   }
   
   // Soft delete
@@ -2537,10 +2551,9 @@ async function syncAgentsFromChain() {
   }
 }
 
-// TEMP: Admin endpoints
+// Admin endpoints (REQUIRES ADMIN_SECRET in environment)
 app.get('/admin/list-users', async (c) => {
-  const secret = c.req.query('secret');
-  if (secret !== 'temp-link-2026') return c.json({ error: 'Unauthorized' }, 401);
+  if (!checkAdminAuth(c)) return c.json({ error: 'Unauthorized' }, 401);
   
   const users = await prisma.user.findMany({
     where: { privyId: { not: null } },
@@ -2550,8 +2563,8 @@ app.get('/admin/list-users', async (c) => {
 });
 
 app.post('/admin/link-agent', async (c) => {
-  const { secret, agentWallet, userId } = await c.req.json();
-  if (secret !== 'temp-link-2026') return c.json({ error: 'Unauthorized' }, 401);
+  if (!checkAdminAuth(c)) return c.json({ error: 'Unauthorized' }, 401);
+  const { agentWallet, userId } = await c.req.json();
   
   const result = await prisma.userAgent.upsert({
     where: { userId_agentWallet: { userId, agentWallet } },
@@ -2562,8 +2575,7 @@ app.post('/admin/link-agent', async (c) => {
 });
 
 app.delete('/admin/agent/:id', async (c) => {
-  const secret = c.req.query('secret');
-  if (secret !== 'temp-link-2026') return c.json({ error: 'Unauthorized' }, 401);
+  if (!checkAdminAuth(c)) return c.json({ error: 'Unauthorized' }, 401);
   const { id } = c.req.param();
   await prisma.agent.delete({ where: { id } });
   return c.json({ ok: true, deleted: id });
@@ -2582,15 +2594,22 @@ app.post('/api/grants/apply', async (c) => {
 });
 
 app.get('/admin/grants', async (c) => {
-  const secret = c.req.query('secret');
-  if (secret !== 'temp-link-2026') return c.json({ error: 'Unauthorized' }, 401);
+  if (!checkAdminAuth(c)) return c.json({ error: 'Unauthorized' }, 401);
   const applications = await prisma.grantApplication.findMany({ orderBy: { createdAt: 'desc' } });
   return c.json({ applications });
 });
 
+// Admin authentication helper - REQUIRES ADMIN_SECRET environment variable
 const checkAdminAuth = (c: any): boolean => {
   const secret = c.req.query('secret') || c.req.header('x-admin-secret');
-  return secret === (process.env.ADMIN_SECRET || 'temp-link-2026');
+  const adminSecret = process.env.ADMIN_SECRET;
+  
+  if (!adminSecret) {
+    console.error('ADMIN_SECRET not configured in environment variables');
+    return false;
+  }
+  
+  return secret === adminSecret;
 };
 
 app.post('/admin/grants/:id/approve', async (c) => {
@@ -2608,8 +2627,8 @@ app.post('/admin/grants/:id/reject', async (c) => {
 });
 
 app.post('/admin/feedback', async (c) => {
-  const { secret, fromWallet, toWallet, score, comment } = await c.req.json();
-  if (secret !== 'temp-link-2026') return c.json({ error: 'Unauthorized' }, 401);
+  if (!checkAdminAuth(c)) return c.json({ error: 'Unauthorized' }, 401);
+  const { fromWallet, toWallet, score, comment } = await c.req.json();
   const targetAgent = await prisma.agent.findUnique({ where: { wallet: toWallet } });
   if (!targetAgent) return c.json({ error: 'Agent not found' }, 404);
   const fromAgent = await prisma.agent.findUnique({ where: { wallet: fromWallet } });
@@ -2629,8 +2648,8 @@ app.post('/admin/feedback', async (c) => {
 });
 
 app.post('/admin/delete-feedback', async (c) => {
-  const { secret, fromWallet, toWallet } = await c.req.json();
-  if (secret !== 'temp-link-2026') return c.json({ error: 'Unauthorized' }, 401);
+  if (!checkAdminAuth(c)) return c.json({ error: 'Unauthorized' }, 401);
+  const { fromWallet, toWallet } = await c.req.json();
   await prisma.feedback.delete({ where: { fromWallet_toWallet: { fromWallet, toWallet } } });
   const allFeedback = await prisma.feedback.findMany({ where: { toWallet }, select: { score: true, weight: true } });
   let totalWeight = 0, weightedSum = 0;
