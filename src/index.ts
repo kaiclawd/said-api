@@ -13,7 +13,15 @@ import {
   getAssociatedTokenAddressSync,
   getMintLen,
   ExtensionType,
+  TYPE_SIZE,
+  LENGTH_SIZE,
 } from '@solana/spl-token';
+import {
+  createInitializeInstruction,
+  createUpdateFieldInstruction,
+  pack,
+  TokenMetadata,
+} from '@solana/spl-token-metadata';
 import { config } from 'dotenv';
 import nacl from 'tweetnacl';
 import bs58 from 'bs58';
@@ -1547,8 +1555,18 @@ app.post('/api/passport/:wallet/prepare', async (c) => {
     const seed = createHash('sha256').update(`said-passport-v1:${wallet}`).digest('hex').slice(0, 32);
     const mintPubkey = await PublicKey.createWithSeed(ownerPubkey, seed, TOKEN_2022_PROGRAM_ID);
 
-    // Calculate space for NonTransferable + MetadataPointer extensions
-    const mintLen = getMintLen([ExtensionType.NonTransferable, ExtensionType.MetadataPointer]);
+    // Prepare on-chain metadata
+    const metadata: TokenMetadata = {
+      mint: mintPubkey,
+      name: `${agent.name || 'Agent'} - SAID Passport`,
+      symbol: 'PASSPORT',
+      uri: `https://api.saidprotocol.com/api/passport/${wallet}/metadata`,
+      additionalMetadata: [],
+    };
+
+    // Calculate space for NonTransferable + MetadataPointer + Metadata extensions
+    const metadataLen = pack(metadata).length;
+    const mintLen = getMintLen([ExtensionType.NonTransferable, ExtensionType.MetadataPointer]) + metadataLen;
     const mintLamports = await connection.getMinimumBalanceForRentExemption(mintLen);
 
     // Get ATA address
@@ -1575,11 +1593,11 @@ app.post('/api/passport/:wallet/prepare', async (c) => {
       programId: TOKEN_2022_PROGRAM_ID,
     }));
 
-    // 3. Initialize MetadataPointer extension (points to external metadata)
+    // 3. Initialize MetadataPointer extension (points to mint itself for on-chain metadata)
     tx.add(createInitializeMetadataPointerInstruction(
       mintPubkey,
       ownerPubkey,
-      null, // Use external metadata via URI
+      mintPubkey, // Metadata stored in the mint account itself
       TOKEN_2022_PROGRAM_ID
     ));
 
@@ -1589,10 +1607,22 @@ app.post('/api/passport/:wallet/prepare', async (c) => {
     // 5. Initialize mint (0 decimals, owner is mint authority)
     tx.add(createInitializeMintInstruction(mintPubkey, 0, ownerPubkey, null, TOKEN_2022_PROGRAM_ID));
 
-    // 6. Create ATA
+    // 6. Initialize on-chain metadata
+    tx.add(createInitializeInstruction({
+      programId: TOKEN_2022_PROGRAM_ID,
+      mint: mintPubkey,
+      metadata: mintPubkey,
+      name: metadata.name,
+      symbol: metadata.symbol,
+      uri: metadata.uri,
+      mintAuthority: ownerPubkey,
+      updateAuthority: ownerPubkey,
+    }));
+
+    // 7. Create ATA
     tx.add(createAssociatedTokenAccountInstruction(ownerPubkey, ata, ownerPubkey, mintPubkey, TOKEN_2022_PROGRAM_ID));
 
-    // 7. Mint 1 token
+    // 8. Mint 1 token
     tx.add(createMintToInstruction(mintPubkey, ata, ownerPubkey, 1, [], TOKEN_2022_PROGRAM_ID));
 
     const serialized = tx.serialize({ requireAllSignatures: false, verifySignatures: false });
