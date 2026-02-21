@@ -1630,7 +1630,7 @@ app.post('/api/passport/:wallet/prepare', async (c) => {
 
     // Simulate transaction to catch errors before sending to wallet
     try {
-      const simulation = await connection.simulateTransaction(tx, { sigVerify: false });
+      const simulation = await connection.simulateTransaction(tx);
       if (simulation.value.err) {
         console.error('Simulation error:', JSON.stringify(simulation.value.err));
         console.error('Logs:', simulation.value.logs);
