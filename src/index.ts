@@ -1634,8 +1634,11 @@ app.post('/api/passport/:wallet/prepare', async (c) => {
       if (simulation.value.err) {
         console.error('Simulation error:', JSON.stringify(simulation.value.err));
         console.error('Logs:', simulation.value.logs);
+        
+        // Return detailed error for debugging
+        const errorMsg = simulation.value.logs?.join('\n') || JSON.stringify(simulation.value.err);
         return c.json({ 
-          error: 'Transaction simulation failed', 
+          error: `Transaction simulation failed: ${errorMsg}`,
           details: simulation.value.err,
           logs: simulation.value.logs 
         }, 400);
