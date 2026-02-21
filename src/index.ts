@@ -1617,11 +1617,12 @@ app.post('/api/passport/:wallet/finalize', async (c) => {
   const agent = await prisma.agent.findUnique({ where: { wallet } });
   if (!agent) return c.json({ error: 'Agent not found' }, 404);
 
-  // Verify tx landed on-chain
+  // Verify tx landed on-chain (give it time to confirm)
   try {
-    const status = await connection.getSignatureStatus(txHash, { searchTransactionHistory: true });
-    if (!status?.value || status.value.err) {
-      return c.json({ error: 'Transaction not confirmed or failed on-chain' }, 400);
+    // Wait up to 30 seconds for confirmation
+    const confirmed = await connection.confirmTransaction(txHash, 'confirmed');
+    if (confirmed.value.err) {
+      return c.json({ error: 'Transaction failed on-chain' }, 400);
     }
   } catch (err: any) {
     return c.json({ error: 'Could not verify transaction: ' + err.message }, 400);
