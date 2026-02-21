@@ -1648,6 +1648,26 @@ app.post('/api/passport/:wallet/finalize', async (c) => {
   });
 });
 
+/**
+ * POST /api/passport/broadcast
+ * Proxy endpoint to broadcast signed transaction via server RPC (private QuickNode)
+ */
+app.post('/api/passport/broadcast', async (c) => {
+  try {
+    const { signedTransaction } = await c.req.json() as { signedTransaction: string };
+    if (!signedTransaction) return c.json({ error: 'signedTransaction required' }, 400);
+
+    const txBytes = Buffer.from(signedTransaction, 'base64');
+    const signature = await connection.sendRawTransaction(txBytes, { skipPreflight: false });
+    
+    // Don't wait for confirmation here - return signature immediately
+    return c.json({ ok: true, signature });
+  } catch (err: any) {
+    console.error('Broadcast transaction error:', err);
+    return c.json({ error: err.message }, 500);
+  }
+});
+
 // ============ END SAID PASSPORT ============
 
 /**
@@ -2679,3 +2699,23 @@ serve({ fetch: app.fetch, port }, (info) => {
   console.log(`SAID API running on http://localhost:${info.port}`);
 });
 // Rebuild trigger Tue Feb  3 17:46:45 UTC 2026
+
+/**
+ * POST /api/passport/:wallet/send
+ * Proxy endpoint to send signed transaction via server RPC
+ */
+app.post('/api/passport/:wallet/send', async (c) => {
+  try {
+    const { signedTransaction } = await c.req.json() as { signedTransaction: string };
+    if (!signedTransaction) return c.json({ error: 'signedTransaction required' }, 400);
+
+    const txBytes = Buffer.from(signedTransaction, 'base64');
+    const signature = await connection.sendRawTransaction(txBytes, { skipPreflight: false });
+    await connection.confirmTransaction(signature, 'confirmed');
+
+    return c.json({ ok: true, signature });
+  } catch (err: any) {
+    console.error('Send transaction error:', err);
+    return c.json({ error: err.message }, 500);
+  }
+});
