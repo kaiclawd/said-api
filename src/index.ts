@@ -1404,7 +1404,7 @@ app.post('/api/verify/layer2/activity/:wallet', async (c) => {
 // ============ SAID PASSPORT ============
 
 const PASSPORT_PRICE_SOL = 0.05;
-const SAID_TREASURY_WALLET = process.env.SAID_TREASURY_WALLET || '72onvrQJZkPGLAhWK5MeYc73iyM72P2ABKzDMQ4NpQBL';
+const SAID_TREASURY_WALLET = process.env.SAID_TREASURY_WALLET || '2XfHTeNWTjNwUmgoXaafYuqHcAAXj8F5Kjw2Bnzi4FxH';
 
 /**
  * GET /api/passport/:wallet/image
