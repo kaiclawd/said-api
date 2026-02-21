@@ -2748,6 +2748,192 @@ app.get('/admin/delete-agent/:id', async (c) => {
   return c.json({ ok: true, deleted: id });
 });
 
+// ==================== PASSPORT API ====================
+
+// GET /api/verify/:wallet - Check if agent is registered and verified
+app.get('/api/verify/:wallet', async (c) => {
+  const { wallet } = c.req.param();
+  
+  try {
+    const agent = await prisma.agent.findUnique({
+      where: { wallet },
+      select: {
+        wallet: true,
+        pda: true,
+        name: true,
+        description: true,
+        isVerified: true,
+        verifiedAt: true,
+        passportMint: true,
+        passportMintedAt: true,
+        passportTxHash: true,
+        registeredAt: true
+      }
+    });
+
+    if (!agent) {
+      return c.json({
+        registered: false,
+        verified: false,
+        error: 'Agent not found'
+      }, 404);
+    }
+
+    return c.json({
+      registered: true,
+      verified: agent.isVerified,
+      passportMint: agent.passportMint,
+      passportMintedAt: agent.passportMintedAt,
+      name: agent.name,
+      description: agent.description,
+      wallet: agent.wallet,
+      pda: agent.pda
+    });
+  } catch (error) {
+    console.error('Error verifying agent:', error);
+    return c.json({ error: 'Failed to verify agent' }, 500);
+  }
+});
+
+// POST /api/passport/:wallet/prepare - Prepare mint transaction
+app.post('/api/passport/:wallet/prepare', async (c) => {
+  const { wallet } = c.req.param();
+  
+  try {
+    // Check if agent is verified
+    const agent = await prisma.agent.findUnique({
+      where: { wallet },
+      select: { isVerified: true, passportMint: true }
+    });
+
+    if (!agent) {
+      return c.json({ error: 'Agent not found' }, 404);
+    }
+
+    if (!agent.isVerified) {
+      return c.json({ error: 'Agent must be verified before minting passport' }, 403);
+    }
+
+    if (agent.passportMint) {
+      return c.json({ error: 'Passport already minted' }, 400);
+    }
+
+    const ownerPubkey = new PublicKey(wallet);
+    
+    // For now, return a simple response
+    // The actual minting will be handled client-side or we can implement full minting later
+    return c.json({
+      transaction: '', // Placeholder - frontend handles minting
+      mintAddress: Keypair.generate().publicKey.toString()
+    });
+  } catch (error) {
+    console.error('Error preparing passport:', error);
+    return c.json({ error: 'Failed to prepare transaction' }, 500);
+  }
+});
+
+// POST /api/passport/broadcast - Broadcast signed transaction
+app.post('/api/passport/broadcast', async (c) => {
+  try {
+    const { signedTransaction } = await c.req.json();
+    
+    if (!signedTransaction) {
+      return c.json({ error: 'Missing signedTransaction' }, 400);
+    }
+    
+    // Send transaction using QuickNode RPC
+    const signature = await connection.sendRawTransaction(
+      Buffer.from(signedTransaction, 'base64'),
+      { skipPreflight: false, maxRetries: 3 }
+    );
+    
+    // Wait for confirmation
+    await connection.confirmTransaction(signature, 'confirmed');
+    
+    return c.json({ signature });
+  } catch (error: any) {
+    console.error('Error broadcasting passport:', error);
+    return c.json({ 
+      error: error.message || 'Failed to broadcast transaction' 
+    }, 500);
+  }
+});
+
+// POST /api/passport/:wallet/finalize - Store passport mint info in database
+app.post('/api/passport/:wallet/finalize', async (c) => {
+  const { wallet } = c.req.param();
+  
+  try {
+    const { txHash, mintAddress } = await c.req.json();
+    
+    if (!txHash || !mintAddress) {
+      return c.json({ error: 'Missing txHash or mintAddress' }, 400);
+    }
+    
+    // Update agent record
+    await prisma.agent.update({
+      where: { wallet },
+      data: {
+        passportMint: mintAddress,
+        passportMintedAt: new Date(),
+        passportTxHash: txHash
+      }
+    });
+    
+    return c.json({ 
+      success: true,
+      passportMint: mintAddress,
+      txHash 
+    });
+  } catch (error) {
+    console.error('Error finalizing passport:', error);
+    return c.json({ error: 'Failed to finalize passport' }, 500);
+  }
+});
+
+// GET /api/agents/:wallet/passport - Check passport status
+app.get('/api/agents/:wallet/passport', async (c) => {
+  const { wallet } = c.req.param();
+  
+  try {
+    const agent = await prisma.agent.findUnique({
+      where: { wallet },
+      select: {
+        passportMint: true,
+        passportMintedAt: true,
+        passportTxHash: true,
+        isVerified: true,
+        name: true
+      }
+    });
+    
+    if (!agent) {
+      return c.json({ error: 'Agent not found' }, 404);
+    }
+    
+    if (!agent.passportMint) {
+      return c.json({
+        hasPassport: false,
+        canMint: agent.isVerified,
+        reason: agent.isVerified 
+          ? 'Agent is verified but has not minted passport yet'
+          : 'Agent must be verified before minting passport'
+      });
+    }
+    
+    return c.json({
+      hasPassport: true,
+      mint: agent.passportMint,
+      mintedAt: agent.passportMintedAt,
+      txHash: agent.passportTxHash,
+      image: `https://www.saidprotocol.com/api/passport/${agent.passportMint}/image`
+    });
+  } catch (error) {
+    console.error('Error getting passport:', error);
+    return c.json({ error: 'Failed to get passport' }, 500);
+  }
+});
+
 // ============ START ============
 
 const port = parseInt(process.env.PORT || '3001');
