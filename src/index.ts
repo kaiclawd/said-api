@@ -942,7 +942,7 @@ app.post('/api/register/pending', async (c) => {
 app.post('/api/platforms/spawnr/register', async (c) => {
   // Validate Spawnr API key
   const apiKey = c.req.header('X-Platform-Key');
-  const expectedKey = process.env.SPAWNR_PLATFORM_KEY;
+  const expectedKey = process.env['SPAWNR_PLATFORM_KEY'];
   
   if (!expectedKey) {
     return c.json({ 
@@ -999,7 +999,7 @@ app.post('/api/platforms/spawnr/register', async (c) => {
   }
   
   // Check sponsor wallet
-  const sponsorKey = process.env.SPAWNR_SPONSOR_PRIVATE_KEY;
+  const sponsorKey = process.env['SPAWNR_SPONSOR_PRIVATE_KEY'];
   if (!sponsorKey) {
     return c.json({ 
       error: 'Spawnr sponsor wallet not configured. Contact SAID team.',
@@ -1140,7 +1140,7 @@ app.post('/api/platforms/spawnr/register', async (c) => {
 app.post('/api/platforms/spawnr/confirm', async (c) => {
   // Validate Spawnr API key
   const apiKey = c.req.header('X-Platform-Key');
-  const expectedKey = process.env.SPAWNR_PLATFORM_KEY;
+  const expectedKey = process.env['SPAWNR_PLATFORM_KEY'];
   
   if (!expectedKey || !apiKey || apiKey !== expectedKey) {
     return c.json({ error: 'Invalid or missing X-Platform-Key header' }, 401);
@@ -1268,7 +1268,7 @@ app.post('/api/platforms/spawnr/confirm', async (c) => {
 app.put('/api/platforms/spawnr/agents/:wallet', async (c) => {
   // Validate Spawnr API key
   const apiKey = c.req.header('X-Platform-Key');
-  const expectedKey = process.env.SPAWNR_PLATFORM_KEY;
+  const expectedKey = process.env['SPAWNR_PLATFORM_KEY'];
   
   if (!expectedKey) {
     return c.json({ 
@@ -1373,7 +1373,7 @@ app.put('/api/platforms/spawnr/agents/:wallet', async (c) => {
 app.get('/api/platforms/spawnr/stats', async (c) => {
   // Validate Spawnr API key
   const apiKey = c.req.header('X-Platform-Key');
-  const expectedKey = process.env.SPAWNR_PLATFORM_KEY;
+  const expectedKey = process.env['SPAWNR_PLATFORM_KEY'];
   
   if (!expectedKey) {
     return c.json({ 
@@ -1446,7 +1446,7 @@ app.get('/api/platforms/spawnr/stats', async (c) => {
 app.get('/api/platforms/spawnr/agents', async (c) => {
   // Validate Spawnr API key
   const apiKey = c.req.header('X-Platform-Key');
-  const expectedKey = process.env.SPAWNR_PLATFORM_KEY;
+  const expectedKey = process.env['SPAWNR_PLATFORM_KEY'];
   
   if (!expectedKey) {
     return c.json({ 
@@ -1736,7 +1736,7 @@ Error loading badge. Please try again later.
 app.post('/api/platforms/spawnr/webhooks', async (c) => {
   // Validate Spawnr API key
   const apiKey = c.req.header('X-Platform-Key');
-  const expectedKey = process.env.SPAWNR_PLATFORM_KEY;
+  const expectedKey = process.env['SPAWNR_PLATFORM_KEY'];
   
   if (!expectedKey) {
     return c.json({ 
