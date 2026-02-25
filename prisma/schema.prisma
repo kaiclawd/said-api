@@ -236,3 +236,15 @@ model EmailOTP {
   @@index([email])
   @@index([code])
 }
+
+model WebhookConfig {
+  id              String    @id @default(cuid())
+  platform        String    // e.g., "spawnr"
+  url             String
+  events          String[]  // e.g., ["reputation_change", "verification_complete"]
+  active          Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  @@index([platform])
+}

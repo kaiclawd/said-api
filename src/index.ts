@@ -901,6 +901,20 @@ app.post('/api/register/pending', async (c) => {
 // ============ PLATFORM-SPECIFIC INTEGRATIONS ============
 
 /**
+ * SPAWNR.IO INTEGRATION ENDPOINTS
+ * 
+ * All endpoints require authentication via X-Platform-Key header (except badge embed)
+ * 
+ * Available endpoints:
+ * - POST   /api/platforms/spawnr/register       - Register new agent with instant verification
+ * - PUT    /api/platforms/spawnr/agents/:wallet - Update agent metadata
+ * - GET    /api/platforms/spawnr/agents         - List all Spawnr agents (paginated)
+ * - GET    /api/platforms/spawnr/stats          - Platform statistics
+ * - POST   /api/platforms/spawnr/webhooks       - Register webhook for events
+ * - GET    /api/badge/embed/:wallet             - Public badge embed (no auth required)
+ */
+
+/**
  * POST /api/platforms/spawnr/register
  * Spawnr.io platform integration - instant verified registration
  * 
@@ -1056,6 +1070,562 @@ app.post('/api/platforms/spawnr/register', async (c) => {
       error: 'Registration failed',
       details: error.message,
       support: 'contact@saidprotocol.com'
+    }, 500);
+  }
+});
+
+/**
+ * PUT /api/platforms/spawnr/agents/:wallet
+ * Update agent metadata for Spawnr-registered agents
+ * 
+ * Authentication: X-Platform-Key header required
+ */
+app.put('/api/platforms/spawnr/agents/:wallet', async (c) => {
+  // Validate Spawnr API key
+  const apiKey = c.req.header('X-Platform-Key');
+  const expectedKey = process.env.SPAWNR_API_KEY;
+  
+  if (!expectedKey) {
+    return c.json({ 
+      error: 'Spawnr integration not configured',
+      support: 'contact@saidprotocol.com'
+    }, 500);
+  }
+  
+  if (!apiKey || apiKey !== expectedKey) {
+    return c.json({ 
+      error: 'Invalid or missing X-Platform-Key header'
+    }, 401);
+  }
+  
+  const wallet = c.req.param('wallet');
+  const body = await c.req.json();
+  const { name, description, twitter, website, capabilities, image } = body;
+  
+  try {
+    // Find agent and verify it's from Spawnr
+    const agent = await prisma.agent.findUnique({ where: { wallet } });
+    
+    if (!agent) {
+      return c.json({ error: 'Agent not found' }, 404);
+    }
+    
+    if (agent.registrationSource !== 'spawnr') {
+      return c.json({ 
+        error: 'Agent not registered via Spawnr',
+        registrationSource: agent.registrationSource 
+      }, 403);
+    }
+    
+    // Update agent
+    const updated = await prisma.agent.update({
+      where: { wallet },
+      data: {
+        name: name !== undefined ? name : agent.name,
+        description: description !== undefined ? description : agent.description,
+        twitter: twitter !== undefined ? twitter : agent.twitter,
+        website: website !== undefined ? website : agent.website,
+        skills: capabilities !== undefined ? capabilities : agent.skills,
+        image: image !== undefined ? image : agent.image,
+        updatedAt: new Date(),
+      }
+    });
+    
+    // Update agent card if exists
+    const existingCard = await prisma.agentCard.findUnique({ where: { wallet } });
+    if (existingCard) {
+      const cardData = JSON.parse(existingCard.cardJson);
+      const updatedCard = {
+        ...cardData,
+        name: name !== undefined ? name : cardData.name,
+        description: description !== undefined ? description : cardData.description,
+        twitter: twitter !== undefined ? twitter : cardData.twitter,
+        website: website !== undefined ? website : cardData.website,
+        capabilities: capabilities !== undefined ? capabilities : cardData.capabilities,
+      };
+      
+      await prisma.agentCard.update({
+        where: { wallet },
+        data: {
+          cardJson: JSON.stringify(updatedCard),
+          updatedAt: new Date(),
+        }
+      });
+    }
+    
+    return c.json({
+      success: true,
+      agent: {
+        wallet: updated.wallet,
+        name: updated.name,
+        description: updated.description,
+        twitter: updated.twitter,
+        website: updated.website,
+        capabilities: updated.skills,
+        image: updated.image,
+        verified: updated.isVerified,
+        layer2Verified: updated.layer2Verified,
+        reputationScore: updated.reputationScore,
+        updatedAt: updated.updatedAt,
+      }
+    });
+    
+  } catch (error: any) {
+    console.error('[Spawnr Update Error]', error);
+    return c.json({ 
+      error: 'Update failed',
+      details: error.message
+    }, 500);
+  }
+});
+
+/**
+ * GET /api/platforms/spawnr/stats
+ * Platform statistics for Spawnr
+ * 
+ * Authentication: X-Platform-Key header required
+ */
+app.get('/api/platforms/spawnr/stats', async (c) => {
+  // Validate Spawnr API key
+  const apiKey = c.req.header('X-Platform-Key');
+  const expectedKey = process.env.SPAWNR_API_KEY;
+  
+  if (!expectedKey) {
+    return c.json({ 
+      error: 'Spawnr integration not configured',
+      support: 'contact@saidprotocol.com'
+    }, 500);
+  }
+  
+  if (!apiKey || apiKey !== expectedKey) {
+    return c.json({ 
+      error: 'Invalid or missing X-Platform-Key header'
+    }, 401);
+  }
+  
+  try {
+    // Get all Spawnr agents
+    const spawnrAgents = await prisma.agent.findMany({
+      where: { registrationSource: 'spawnr' }
+    });
+    
+    const totalAgents = spawnrAgents.length;
+    const totalVerified = spawnrAgents.filter(a => a.isVerified).length;
+    const totalLayer2 = spawnrAgents.filter(a => a.layer2Verified).length;
+    
+    // Calculate average reputation score
+    const avgReputation = totalAgents > 0
+      ? spawnrAgents.reduce((sum, a) => sum + a.reputationScore, 0) / totalAgents
+      : 0;
+    
+    // Get top 5 agents by reputation
+    const topAgents = spawnrAgents
+      .sort((a, b) => b.reputationScore - a.reputationScore)
+      .slice(0, 5)
+      .map(a => ({
+        wallet: a.wallet,
+        name: a.name,
+        reputationScore: a.reputationScore,
+        verified: a.isVerified,
+        layer2Verified: a.layer2Verified,
+      }));
+    
+    return c.json({
+      success: true,
+      stats: {
+        totalAgents,
+        totalVerified,
+        totalLayer2,
+        averageReputation: Math.round(avgReputation * 100) / 100,
+        topAgents,
+      },
+      platform: 'spawnr.io',
+    });
+    
+  } catch (error: any) {
+    console.error('[Spawnr Stats Error]', error);
+    return c.json({ 
+      error: 'Failed to fetch stats',
+      details: error.message
+    }, 500);
+  }
+});
+
+/**
+ * GET /api/platforms/spawnr/agents
+ * List all Spawnr-registered agents (paginated)
+ * 
+ * Authentication: X-Platform-Key header required
+ * Query params: ?limit=N&offset=N
+ */
+app.get('/api/platforms/spawnr/agents', async (c) => {
+  // Validate Spawnr API key
+  const apiKey = c.req.header('X-Platform-Key');
+  const expectedKey = process.env.SPAWNR_API_KEY;
+  
+  if (!expectedKey) {
+    return c.json({ 
+      error: 'Spawnr integration not configured',
+      support: 'contact@saidprotocol.com'
+    }, 500);
+  }
+  
+  if (!apiKey || apiKey !== expectedKey) {
+    return c.json({ 
+      error: 'Invalid or missing X-Platform-Key header'
+    }, 401);
+  }
+  
+  try {
+    // Parse query params
+    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100);
+    const offset = parseInt(c.req.query('offset') || '0');
+    
+    // Get agents
+    const agents = await prisma.agent.findMany({
+      where: { registrationSource: 'spawnr' },
+      take: limit,
+      skip: offset,
+      orderBy: { registeredAt: 'desc' },
+    });
+    
+    // Get total count
+    const total = await prisma.agent.count({
+      where: { registrationSource: 'spawnr' }
+    });
+    
+    return c.json({
+      success: true,
+      agents: agents.map(a => ({
+        wallet: a.wallet,
+        name: a.name,
+        verified: a.isVerified,
+        layer2Verified: a.layer2Verified,
+        reputationScore: a.reputationScore,
+        registeredAt: a.registeredAt,
+      })),
+      pagination: {
+        total,
+        limit,
+        offset,
+        hasMore: offset + limit < total,
+      }
+    });
+    
+  } catch (error: any) {
+    console.error('[Spawnr List Error]', error);
+    return c.json({ 
+      error: 'Failed to fetch agents',
+      details: error.message
+    }, 500);
+  }
+});
+
+/**
+ * GET /api/badge/embed/:wallet
+ * Public embeddable badge - NO AUTH REQUIRED
+ * 
+ * Returns HTML with inline CSS for iframe embedding
+ */
+app.get('/api/badge/embed/:wallet', async (c) => {
+  const wallet = c.req.param('wallet');
+  
+  try {
+    const agent = await prisma.agent.findUnique({ where: { wallet } });
+    
+    if (!agent) {
+      // Return "Not Found" badge
+      const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SAID Badge</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: transparent;
+      padding: 16px;
+    }
+    .badge {
+      background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+      border: 2px solid #404040;
+      border-radius: 12px;
+      padding: 20px;
+      max-width: 400px;
+      color: #fff;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .logo {
+      width: 40px;
+      height: 40px;
+      background: #404040;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      font-size: 18px;
+    }
+    .title {
+      font-size: 18px;
+      font-weight: 600;
+    }
+    .status {
+      display: inline-block;
+      padding: 4px 12px;
+      background: #404040;
+      color: #999;
+      border-radius: 6px;
+      font-size: 14px;
+      margin-top: 8px;
+    }
+    .footer {
+      margin-top: 12px;
+      font-size: 12px;
+      color: #888;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="badge">
+    <div class="header">
+      <div class="logo">S</div>
+      <div class="title">Agent Not Found</div>
+    </div>
+    <div class="status">⚠️ Not Registered</div>
+    <div class="footer">Powered by SAID Protocol</div>
+  </div>
+</body>
+</html>`;
+      return c.html(html);
+    }
+    
+    // Return verified/not verified badge
+    const isVerified = agent.isVerified;
+    const statusColor = isVerified ? '#10b981' : '#6b7280';
+    const statusBg = isVerified ? '#10b98120' : '#6b728020';
+    const statusText = isVerified ? '✓ SAID Verified' : 'Not Verified';
+    
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SAID Badge - ${agent.name || wallet.slice(0, 8)}</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: transparent;
+      padding: 16px;
+    }
+    .badge {
+      background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+      border: 2px solid ${isVerified ? statusColor : '#404040'};
+      border-radius: 12px;
+      padding: 20px;
+      max-width: 400px;
+      color: #fff;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .logo {
+      width: 40px;
+      height: 40px;
+      background: ${isVerified ? statusColor : '#404040'};
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      font-size: 18px;
+    }
+    .info {
+      flex: 1;
+    }
+    .name {
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .wallet {
+      font-size: 12px;
+      color: #888;
+      font-family: monospace;
+    }
+    .status {
+      display: inline-block;
+      padding: 6px 12px;
+      background: ${statusBg};
+      color: ${statusColor};
+      border: 1px solid ${statusColor};
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 600;
+      margin-top: 12px;
+    }
+    .reputation {
+      margin-top: 12px;
+      padding: 12px;
+      background: #ffffff08;
+      border-radius: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .rep-label {
+      font-size: 13px;
+      color: #aaa;
+    }
+    .rep-score {
+      font-size: 20px;
+      font-weight: 700;
+      color: ${statusColor};
+    }
+    .footer {
+      margin-top: 12px;
+      font-size: 12px;
+      color: #888;
+      text-align: center;
+    }
+    .footer a {
+      color: ${statusColor};
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="badge">
+    <div class="header">
+      <div class="logo">${isVerified ? '✓' : 'S'}</div>
+      <div class="info">
+        <div class="name">${agent.name || 'Agent'}</div>
+        <div class="wallet">${wallet.slice(0, 4)}...${wallet.slice(-4)}</div>
+      </div>
+    </div>
+    <div class="status">${statusText}</div>
+    <div class="reputation">
+      <div class="rep-label">Reputation Score</div>
+      <div class="rep-score">${Math.round(agent.reputationScore)}</div>
+    </div>
+    <div class="footer">
+      Powered by <a href="https://www.saidprotocol.com" target="_blank">SAID Protocol</a>
+    </div>
+  </div>
+</body>
+</html>`;
+    
+    return c.html(html);
+    
+  } catch (error: any) {
+    console.error('[Badge Embed Error]', error);
+    const html = `<!DOCTYPE html>
+<html><body style="font-family: sans-serif; padding: 20px; color: #666;">
+Error loading badge. Please try again later.
+</body></html>`;
+    return c.html(html, 500);
+  }
+});
+
+/**
+ * POST /api/platforms/spawnr/webhooks
+ * Register webhook URL for event notifications
+ * 
+ * Authentication: X-Platform-Key header required
+ * Body: { url: string, events: string[] }
+ * Events: ["reputation_change", "verification_complete"]
+ */
+app.post('/api/platforms/spawnr/webhooks', async (c) => {
+  // Validate Spawnr API key
+  const apiKey = c.req.header('X-Platform-Key');
+  const expectedKey = process.env.SPAWNR_API_KEY;
+  
+  if (!expectedKey) {
+    return c.json({ 
+      error: 'Spawnr integration not configured',
+      support: 'contact@saidprotocol.com'
+    }, 500);
+  }
+  
+  if (!apiKey || apiKey !== expectedKey) {
+    return c.json({ 
+      error: 'Invalid or missing X-Platform-Key header'
+    }, 401);
+  }
+  
+  const body = await c.req.json();
+  const { url, events } = body;
+  
+  // Validate input
+  if (!url || !events || !Array.isArray(events)) {
+    return c.json({ 
+      error: 'Required fields: url (string), events (array)',
+      example: {
+        url: 'https://spawnr.io/webhooks/said',
+        events: ['reputation_change', 'verification_complete']
+      }
+    }, 400);
+  }
+  
+  // Validate URL format
+  try {
+    new URL(url);
+  } catch {
+    return c.json({ error: 'Invalid URL format' }, 400);
+  }
+  
+  // Validate events
+  const validEvents = ['reputation_change', 'verification_complete'];
+  const invalidEvents = events.filter(e => !validEvents.includes(e));
+  if (invalidEvents.length > 0) {
+    return c.json({ 
+      error: 'Invalid event types',
+      invalid: invalidEvents,
+      valid: validEvents
+    }, 400);
+  }
+  
+  try {
+    // Store webhook config
+    const webhook = await prisma.webhookConfig.create({
+      data: {
+        platform: 'spawnr',
+        url,
+        events,
+        active: true,
+      }
+    });
+    
+    return c.json({
+      success: true,
+      webhook: {
+        id: webhook.id,
+        url: webhook.url,
+        events: webhook.events,
+        active: webhook.active,
+        createdAt: webhook.createdAt,
+      },
+      note: 'Webhook dispatching will be implemented soon. For now, the URL is stored and ready.'
+    });
+    
+  } catch (error: any) {
+    console.error('[Spawnr Webhook Error]', error);
+    return c.json({ 
+      error: 'Failed to register webhook',
+      details: error.message
     }, 500);
   }
 });
