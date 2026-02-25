@@ -1128,12 +1128,13 @@ app.post('/api/platforms/spawnr/register', async (c) => {
  */
 app.post('/api/platforms/spawnr/confirm', async (c) => {
   // Validate Spawnr API key
-  const apiKey = c.req.header('X-Platform-Key');
-  // TODO: Re-enable auth - const expectedKey = process.env['SPAWNR_PLATFORM_KEY'];
+  // TODO: Re-enable auth after testing
+  // const apiKey = c.req.header('X-Platform-Key');
+  // const expectedKey = process.env['SPAWNR_PLATFORM_KEY'];
   
   // if (!expectedKey || !apiKey || apiKey !== expectedKey) {
-  // return c.json({ error: "Invalid or missing X-Platform-Key header' }, 401);
-  }
+  //   return c.json({ error: "Invalid or missing X-Platform-Key header" }, 401);
+  // }
   
   const body = await c.req.json();
   const { signedTransaction, wallet, name, description, twitter, website, capabilities } = body;
@@ -1256,21 +1257,22 @@ app.post('/api/platforms/spawnr/confirm', async (c) => {
  */
 app.put('/api/platforms/spawnr/agents/:wallet', async (c) => {
   // Validate Spawnr API key
-  const apiKey = c.req.header('X-Platform-Key');
-  // TODO: Re-enable auth - const expectedKey = process.env['SPAWNR_PLATFORM_KEY'];
+  // TODO: Re-enable auth after testing
+  // const apiKey = c.req.header('X-Platform-Key');
+  // const expectedKey = process.env['SPAWNR_PLATFORM_KEY'];
   
   // if (!expectedKey) {
-  // return c.json({ 
-      error: 'Spawnr integration not configured',
-      support: 'contact@saidprotocol.com'
-    }, 500);
-  }
+  //   return c.json({ 
+  //     error: 'Spawnr integration not configured',
+  //     support: 'contact@saidprotocol.com'
+  //   }, 500);
+  // }
   
-  if (!apiKey || apiKey !== expectedKey) {
-    return c.json({ 
-      error: 'Invalid or missing X-Platform-Key header'
-    }, 401);
-  }
+  // if (!apiKey || apiKey !== expectedKey) {
+  //   return c.json({ 
+  //     error: 'Invalid or missing X-Platform-Key header'
+  //   }, 401);
+  // }
   
   const wallet = c.req.param('wallet');
   const body = await c.req.json();
@@ -1361,21 +1363,22 @@ app.put('/api/platforms/spawnr/agents/:wallet', async (c) => {
  */
 app.get('/api/platforms/spawnr/stats', async (c) => {
   // Validate Spawnr API key
-  const apiKey = c.req.header('X-Platform-Key');
-  // TODO: Re-enable auth - const expectedKey = process.env['SPAWNR_PLATFORM_KEY'];
+  // TODO: Re-enable auth after testing
+  // const apiKey = c.req.header('X-Platform-Key');
+  // const expectedKey = process.env['SPAWNR_PLATFORM_KEY'];
   
   // if (!expectedKey) {
-  // return c.json({ 
-      error: 'Spawnr integration not configured',
-      support: 'contact@saidprotocol.com'
-    }, 500);
-  }
+  //   return c.json({ 
+  //     error: 'Spawnr integration not configured',
+  //     support: 'contact@saidprotocol.com'
+  //   }, 500);
+  // }
   
-  if (!apiKey || apiKey !== expectedKey) {
-    return c.json({ 
-      error: 'Invalid or missing X-Platform-Key header'
-    }, 401);
-  }
+  // if (!apiKey || apiKey !== expectedKey) {
+  //   return c.json({ 
+  //     error: 'Invalid or missing X-Platform-Key header'
+  //   }, 401);
+  // }
   
   try {
     // Get all Spawnr agents
@@ -1434,21 +1437,22 @@ app.get('/api/platforms/spawnr/stats', async (c) => {
  */
 app.get('/api/platforms/spawnr/agents', async (c) => {
   // Validate Spawnr API key
-  const apiKey = c.req.header('X-Platform-Key');
-  // TODO: Re-enable auth - const expectedKey = process.env['SPAWNR_PLATFORM_KEY'];
+  // TODO: Re-enable auth after testing
+  // const apiKey = c.req.header('X-Platform-Key');
+  // const expectedKey = process.env['SPAWNR_PLATFORM_KEY'];
   
   // if (!expectedKey) {
-  // return c.json({ 
-      error: 'Spawnr integration not configured',
-      support: 'contact@saidprotocol.com'
-    }, 500);
-  }
+  //   return c.json({ 
+  //     error: 'Spawnr integration not configured',
+  //     support: 'contact@saidprotocol.com'
+  //   }, 500);
+  // }
   
-  if (!apiKey || apiKey !== expectedKey) {
-    return c.json({ 
-      error: 'Invalid or missing X-Platform-Key header'
-    }, 401);
-  }
+  // if (!apiKey || apiKey !== expectedKey) {
+  //   return c.json({ 
+  //     error: 'Invalid or missing X-Platform-Key header'
+  //   }, 401);
+  // }
   
   try {
     // Parse query params
@@ -1724,21 +1728,22 @@ Error loading badge. Please try again later.
  */
 app.post('/api/platforms/spawnr/webhooks', async (c) => {
   // Validate Spawnr API key
-  const apiKey = c.req.header('X-Platform-Key');
-  // TODO: Re-enable auth - const expectedKey = process.env['SPAWNR_PLATFORM_KEY'];
+  // TODO: Re-enable auth after testing
+  // const apiKey = c.req.header('X-Platform-Key');
+  // const expectedKey = process.env['SPAWNR_PLATFORM_KEY'];
   
   // if (!expectedKey) {
-  // return c.json({ 
-      error: 'Spawnr integration not configured',
-      support: 'contact@saidprotocol.com'
-    }, 500);
-  }
+  //   return c.json({ 
+  //     error: 'Spawnr integration not configured',
+  //     support: 'contact@saidprotocol.com'
+  //   }, 500);
+  // }
   
-  if (!apiKey || apiKey !== expectedKey) {
-    return c.json({ 
-      error: 'Invalid or missing X-Platform-Key header'
-    }, 401);
-  }
+  // if (!apiKey || apiKey !== expectedKey) {
+  //   return c.json({ 
+  //     error: 'Invalid or missing X-Platform-Key header'
+  //   }, 401);
+  // }
   
   const body = await c.req.json();
   const { url, events } = body;
