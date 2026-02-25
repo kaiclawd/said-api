@@ -999,10 +999,10 @@ app.post('/api/platforms/spawnr/register', async (c) => {
   }
   
   // Check sponsor wallet
-  const sponsorKey = process.env.SPAWNR_SPONSOR_PRIVATE_KEY;
+  const sponsorKey = process.env.SPONSOR_PRIVATE_KEY;
   if (!sponsorKey) {
     return c.json({ 
-      error: 'Spawnr sponsor wallet not configured. Contact SAID team.',
+      error: 'Sponsor wallet not configured. Contact SAID team.',
       support: 'contact@saidprotocol.com'
     }, 500);
   }
