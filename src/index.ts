@@ -927,6 +927,18 @@ app.post('/api/register/pending', async (c) => {
  * 
  * No user signature required - Spawnr authenticates via API key
  */
+/**
+ * POST /api/platforms/spawnr/register
+ * Step 1: Build on-chain registration + verification transaction
+ * Returns a serialized transaction for the agent wallet to sign
+ * 
+ * Flow:
+ *   1. Spawnr calls this endpoint with agent wallet + metadata
+ *   2. We build a transaction with register_agent + get_verified instructions
+ *   3. Sponsor wallet pays all fees (rent + 0.01 SOL verification)
+ *   4. Return serialized tx (base64) — agent wallet must sign
+ *   5. Spawnr signs with agent keypair, calls /confirm to broadcast
+ */
 app.post('/api/platforms/spawnr/register', async (c) => {
   // Validate Spawnr API key
   const apiKey = c.req.header('X-Platform-Key');
@@ -947,35 +959,38 @@ app.post('/api/platforms/spawnr/register', async (c) => {
   }
   
   const body = await c.req.json();
-  const { wallet, name, description, twitter, website, capabilities, metadata } = body;
+  const { wallet, name, description, twitter, website, capabilities } = body;
   
   // Validate required fields
   if (!wallet || !name) {
     return c.json({ error: 'Required fields: wallet, name' }, 400);
   }
+
+  // Validate wallet format
+  let agentPubkey: PublicKey;
+  try {
+    agentPubkey = new PublicKey(wallet);
+  } catch {
+    return c.json({ error: 'Invalid wallet address' }, 400);
+  }
   
-  // Check if already registered
-  const existing = await prisma.agent.findUnique({ where: { wallet } });
-  if (existing) {
-    // Agent already exists - update verification if not verified
-    if (!existing.isVerified) {
-      await prisma.agent.update({
-        where: { wallet },
-        data: {
-          isVerified: true,
-          verifiedAt: new Date(),
-          sponsored: true,
-        }
-      });
-    }
-    
+  // Check if already registered on-chain
+  const [pda] = PublicKey.findProgramAddressSync(
+    [Buffer.from('agent'), agentPubkey.toBuffer()],
+    SAID_PROGRAM_ID
+  );
+  
+  const existingOnChain = await connection.getAccountInfo(pda);
+  if (existingOnChain) {
+    // Already on-chain — check DB and return
+    const existing = await prisma.agent.findUnique({ where: { wallet } });
     return c.json({
       success: true,
-      message: existing.isVerified ? 'Agent already verified' : 'Agent upgraded to verified',
+      message: 'Agent already registered on-chain',
       agent: {
-        wallet: existing.wallet,
-        pda: existing.pda,
-        name: existing.name,
+        wallet,
+        pda: pda.toString(),
+        name: existing?.name || name,
         verified: true,
         profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
         badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
@@ -983,14 +998,19 @@ app.post('/api/platforms/spawnr/register', async (c) => {
     });
   }
   
+  // Check sponsor wallet
+  const sponsorKey = process.env.SPONSOR_PRIVATE_KEY;
+  if (!sponsorKey) {
+    return c.json({ 
+      error: 'Sponsor wallet not configured. Contact SAID team.',
+      support: 'contact@saidprotocol.com'
+    }, 500);
+  }
+  
   try {
-    // Compute PDA (deterministic)
-    const [pda] = PublicKey.findProgramAddressSync(
-      [Buffer.from('agent'), new PublicKey(wallet).toBuffer()],
-      SAID_PROGRAM_ID
-    );
+    const sponsorKeypair = Keypair.fromSecretKey(bs58.decode(sponsorKey));
     
-    // Build agent card
+    // Store agent card first (needed for metadata_uri)
     const card = {
       name,
       description: description || `${name} - AI Agent`,
@@ -1005,69 +1025,234 @@ app.post('/api/platforms/spawnr/register', async (c) => {
     
     const metadataUri = `https://api.saidprotocol.com/api/cards/${wallet}.json`;
     
-    // Store card
     await prisma.agentCard.upsert({
       where: { wallet },
-      create: {
-        wallet,
-        cardJson: JSON.stringify(card),
-      },
-      update: {
-        cardJson: JSON.stringify(card),
-      }
+      create: { wallet, cardJson: JSON.stringify(card) },
+      update: { cardJson: JSON.stringify(card) },
     });
     
-    // Create verified agent in database
-    // We mark as verified immediately - Spawnr agents get instant verification
-    const agent = await prisma.agent.create({
-      data: {
+    // Treasury PDA
+    const [treasuryPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from('treasury')],
+      SAID_PROGRAM_ID
+    );
+    
+    // === Build register_agent instruction ===
+    // Anchor discriminator: sha256("global:register_agent")[0..8]
+    const registerDiscriminator = Buffer.from([135, 157, 66, 195, 2, 113, 175, 30]);
+    // Borsh-encode metadata_uri string (4-byte little-endian length + utf8 bytes)
+    const uriBytes = Buffer.from(metadataUri, 'utf8');
+    const uriLen = Buffer.alloc(4);
+    uriLen.writeUInt32LE(uriBytes.length);
+    const registerData = Buffer.concat([registerDiscriminator, uriLen, uriBytes]);
+    
+    const registerIx = {
+      programId: SAID_PROGRAM_ID,
+      keys: [
+        { pubkey: pda, isSigner: false, isWritable: true },           // agent_identity (init)
+        { pubkey: agentPubkey, isSigner: true, isWritable: true },    // owner (signer + payer)
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program
+      ],
+      data: registerData,
+    };
+    
+    // === Build get_verified instruction ===
+    // Anchor discriminator: sha256("global:get_verified")[0..8]
+    const verifyDiscriminator = Buffer.from([132, 231, 2, 30, 115, 74, 23, 26]);
+    
+    const verifyIx = {
+      programId: SAID_PROGRAM_ID,
+      keys: [
+        { pubkey: pda, isSigner: false, isWritable: true },           // agent_identity
+        { pubkey: treasuryPda, isSigner: false, isWritable: true },   // treasury
+        { pubkey: agentPubkey, isSigner: true, isWritable: true },    // authority (signer + payer of fee)
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program
+      ],
+      data: verifyDiscriminator,
+    };
+    
+    // === Build funding transfer: sponsor → agent wallet ===
+    // Agent needs SOL for: PDA rent (~0.003 SOL) + verification fee (0.01 SOL) + tx fees
+    const FUND_AMOUNT = 0.015 * LAMPORTS_PER_SOL; // 0.015 SOL buffer
+    
+    const fundIx = SystemProgram.transfer({
+      fromPubkey: sponsorKeypair.publicKey,
+      toPubkey: agentPubkey,
+      lamports: FUND_AMOUNT,
+    });
+    
+    // Build transaction: fund → register → verify
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+    
+    const tx = new Transaction({
+      blockhash,
+      lastValidBlockHeight,
+      feePayer: sponsorKeypair.publicKey,  // Sponsor pays tx fees
+    });
+    
+    tx.add(fundIx);      // 1. Fund agent wallet
+    tx.add(registerIx);  // 2. Register on-chain
+    tx.add(verifyIx);    // 3. Get verified badge
+    
+    // Sponsor signs (fee payer + fund transfer)
+    tx.partialSign(sponsorKeypair);
+    
+    // Serialize — agent wallet still needs to sign
+    const serializedTx = tx.serialize({
+      requireAllSignatures: false,
+      verifySignatures: false,
+    }).toString('base64');
+    
+    return c.json({
+      success: true,
+      message: 'Transaction built. Agent wallet must sign and return via /confirm endpoint.',
+      transaction: serializedTx,
+      blockhash,
+      lastValidBlockHeight,
+      requiredSigner: wallet,
+      pda: pda.toString(),
+      metadataUri,
+      instructions: {
+        step1: 'Deserialize the base64 transaction',
+        step2: `Sign with the agent wallet (${wallet})`,
+        step3: 'POST the signed transaction to /api/platforms/spawnr/confirm',
+      },
+      expiresIn: '~60 seconds (blockhash expiry)',
+    });
+    
+  } catch (error: any) {
+    console.error('[Spawnr Register Error]', error);
+    return c.json({ 
+      error: 'Failed to build transaction',
+      details: error.message,
+      support: 'contact@saidprotocol.com'
+    }, 500);
+  }
+});
+
+/**
+ * POST /api/platforms/spawnr/confirm
+ * Step 2: Receive signed transaction, broadcast on-chain, update DB
+ * 
+ * Spawnr signs the transaction from Step 1 with the agent's keypair,
+ * then sends it here. We broadcast, confirm, and update our database.
+ */
+app.post('/api/platforms/spawnr/confirm', async (c) => {
+  // Validate Spawnr API key
+  const apiKey = c.req.header('X-Platform-Key');
+  const expectedKey = process.env.SPAWNR_API_KEY;
+  
+  if (!expectedKey || !apiKey || apiKey !== expectedKey) {
+    return c.json({ error: 'Invalid or missing X-Platform-Key header' }, 401);
+  }
+  
+  const body = await c.req.json();
+  const { signedTransaction, wallet, name, description, twitter, website, capabilities } = body;
+  
+  if (!signedTransaction || !wallet) {
+    return c.json({ error: 'Required: signedTransaction (base64), wallet' }, 400);
+  }
+  
+  try {
+    // Deserialize and broadcast
+    const txBuffer = Buffer.from(signedTransaction, 'base64');
+    const tx = Transaction.from(txBuffer);
+    
+    // Verify the transaction has the expected signers
+    const agentPubkey = new PublicKey(wallet);
+    const signers = tx.signatures.map(s => s.publicKey.toBase58());
+    if (!signers.includes(wallet)) {
+      return c.json({ error: 'Transaction must be signed by the agent wallet' }, 400);
+    }
+    
+    // Broadcast
+    const rawTx = tx.serialize();
+    const txHash = await connection.sendRawTransaction(rawTx, {
+      skipPreflight: false,
+      preflightCommitment: 'confirmed',
+    });
+    
+    // Confirm
+    const confirmation = await connection.confirmTransaction({
+      signature: txHash,
+      blockhash: tx.recentBlockhash!,
+      lastValidBlockHeight: tx.lastValidBlockHeight!,
+    }, 'confirmed');
+    
+    if (confirmation.value.err) {
+      return c.json({ 
+        error: 'Transaction failed on-chain',
+        txHash,
+        details: JSON.stringify(confirmation.value.err),
+      }, 500);
+    }
+    
+    // Success! Update database
+    const [pda] = PublicKey.findProgramAddressSync(
+      [Buffer.from('agent'), agentPubkey.toBuffer()],
+      SAID_PROGRAM_ID
+    );
+    
+    const metadataUri = `https://api.saidprotocol.com/api/cards/${wallet}.json`;
+    
+    // Upsert agent in DB (might exist from a previous partial attempt)
+    const agent = await prisma.agent.upsert({
+      where: { wallet },
+      create: {
         wallet,
         pda: pda.toString(),
         owner: wallet,
         metadataUri,
         registeredAt: new Date(),
-        isVerified: true,  // ✅ INSTANT VERIFICATION
+        isVerified: true,
         verifiedAt: new Date(),
-        sponsored: true,  // We eat the cost
-        name: card.name,
-        description: card.description,
-        twitter: card.twitter,
-        website: card.website,
-        skills: card.capabilities,
+        sponsored: true,
+        name: name || 'Spawnr Agent',
+        description: description || 'AI Agent via Spawnr',
+        twitter: twitter || undefined,
+        website: website || undefined,
+        skills: capabilities || ['chat', 'assistant'],
         registrationSource: 'spawnr',
-        // Auto Layer 2 verification for platform-created agents
         layer2Verified: true,
         layer2VerifiedAt: new Date(),
         l2AttestationMethod: 'platform',
-      }
+      },
+      update: {
+        isVerified: true,
+        verifiedAt: new Date(),
+        sponsored: true,
+        registrationSource: 'spawnr',
+        layer2Verified: true,
+        layer2VerifiedAt: new Date(),
+      },
     });
     
     return c.json({
       success: true,
-      message: 'Agent registered and verified via Spawnr integration',
+      message: 'Agent registered and verified ON-CHAIN via Spawnr',
+      txHash,
+      explorer: `https://solscan.io/tx/${txHash}`,
       agent: {
         wallet: agent.wallet,
         pda: agent.pda,
         name: agent.name,
-        description: agent.description,
-        verified: agent.isVerified,
-        layer2Verified: agent.layer2Verified,
-        registeredAt: agent.registeredAt,
+        verified: true,
+        onChain: true,
         profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
         badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
         badgeWithScore: `https://api.saidprotocol.com/api/badge/${wallet}.svg?style=score`,
-        metadataUri,
       },
       platform: {
         name: 'spawnr.io',
-        costCovered: '0.01 SOL verification fee',
+        costCovered: '~0.015 SOL (rent + verification + fees)',
+        sponsoredBy: 'SAID Protocol',
       }
     });
     
   } catch (error: any) {
-    console.error('[Spawnr Registration Error]', error);
+    console.error('[Spawnr Confirm Error]', error);
     return c.json({ 
-      error: 'Registration failed',
+      error: 'Broadcast failed',
       details: error.message,
       support: 'contact@saidprotocol.com'
     }, 500);
