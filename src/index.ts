@@ -950,7 +950,7 @@ app.post('/api/platforms/spawnr/register', async (c) => {
         data: {
           isVerified: true,
           verifiedAt: new Date(),
-          sponsored: 'spawnr',
+          sponsored: true,
         }
       });
     }
@@ -1015,7 +1015,6 @@ app.post('/api/platforms/spawnr/register', async (c) => {
         isVerified: true,  // ✅ INSTANT VERIFICATION
         verifiedAt: new Date(),
         sponsored: true,  // We eat the cost
-        sponsored: 'spawnr',  // Track the platform
         name: card.name,
         description: card.description,
         twitter: card.twitter,
