@@ -898,6 +898,169 @@ app.post('/api/register/pending', async (c) => {
   }
 });
 
+// ============ PLATFORM-SPECIFIC INTEGRATIONS ============
+
+/**
+ * POST /api/platforms/spawnr/register
+ * Spawnr.io platform integration - instant verified registration
+ * 
+ * Authentication: X-Platform-Key header (Spawnr's API key)
+ * 
+ * All agents created on Spawnr.io are automatically:
+ * - Registered on SAID
+ * - Verified (we eat the 0.01 SOL cost)
+ * - Given full SAID identity
+ * 
+ * No user signature required - Spawnr authenticates via API key
+ */
+app.post('/api/platforms/spawnr/register', async (c) => {
+  // Validate Spawnr API key
+  const apiKey = c.req.header('X-Platform-Key');
+  const expectedKey = process.env.SPAWNR_API_KEY;
+  
+  if (!expectedKey) {
+    return c.json({ 
+      error: 'Spawnr integration not configured. Contact SAID team.',
+      support: 'contact@saidprotocol.com'
+    }, 500);
+  }
+  
+  if (!apiKey || apiKey !== expectedKey) {
+    return c.json({ 
+      error: 'Invalid or missing X-Platform-Key header',
+      instructions: 'Include your Spawnr API key in X-Platform-Key header'
+    }, 401);
+  }
+  
+  const body = await c.req.json();
+  const { wallet, name, description, twitter, website, capabilities, metadata } = body;
+  
+  // Validate required fields
+  if (!wallet || !name) {
+    return c.json({ error: 'Required fields: wallet, name' }, 400);
+  }
+  
+  // Check if already registered
+  const existing = await prisma.agent.findUnique({ where: { wallet } });
+  if (existing) {
+    // Agent already exists - update verification if not verified
+    if (!existing.isVerified) {
+      await prisma.agent.update({
+        where: { wallet },
+        data: {
+          isVerified: true,
+          verifiedAt: new Date(),
+          sponsoredBy: 'spawnr',
+        }
+      });
+    }
+    
+    return c.json({
+      success: true,
+      message: existing.isVerified ? 'Agent already verified' : 'Agent upgraded to verified',
+      agent: {
+        wallet: existing.wallet,
+        pda: existing.pda,
+        name: existing.name,
+        verified: true,
+        profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+        badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
+      }
+    });
+  }
+  
+  try {
+    // Compute PDA (deterministic)
+    const [pda] = PublicKey.findProgramAddressSync(
+      [Buffer.from('agent'), new PublicKey(wallet).toBuffer()],
+      SAID_PROGRAM_ID
+    );
+    
+    // Build agent card
+    const card = {
+      name,
+      description: description || `${name} - AI Agent`,
+      wallet,
+      twitter: twitter || undefined,
+      website: website || undefined,
+      capabilities: capabilities || ['chat', 'assistant'],
+      platform: 'spawnr.io',
+      verified: true,
+      registeredAt: new Date().toISOString(),
+    };
+    
+    const metadataUri = `https://api.saidprotocol.com/api/cards/${wallet}.json`;
+    
+    // Store card
+    await prisma.agentCard.upsert({
+      where: { wallet },
+      create: {
+        wallet,
+        cardJson: JSON.stringify(card),
+      },
+      update: {
+        cardJson: JSON.stringify(card),
+      }
+    });
+    
+    // Create verified agent in database
+    // We mark as verified immediately - Spawnr agents get instant verification
+    const agent = await prisma.agent.create({
+      data: {
+        wallet,
+        pda: pda.toString(),
+        owner: wallet,
+        metadataUri,
+        registeredAt: new Date(),
+        isVerified: true,  // ✅ INSTANT VERIFICATION
+        verifiedAt: new Date(),
+        sponsored: true,  // We eat the cost
+        sponsoredBy: 'spawnr',  // Track the platform
+        name: card.name,
+        description: card.description,
+        twitter: card.twitter,
+        website: card.website,
+        skills: card.capabilities,
+        registrationSource: 'spawnr',
+        // Auto Layer 2 verification for platform-created agents
+        layer2Verified: true,
+        layer2VerifiedAt: new Date(),
+        l2AttestationMethod: 'platform',
+      }
+    });
+    
+    return c.json({
+      success: true,
+      message: 'Agent registered and verified via Spawnr integration',
+      agent: {
+        wallet: agent.wallet,
+        pda: agent.pda,
+        name: agent.name,
+        description: agent.description,
+        verified: agent.isVerified,
+        layer2Verified: agent.layer2Verified,
+        registeredAt: agent.registeredAt,
+        profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+        badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
+        badgeWithScore: `https://api.saidprotocol.com/api/badge/${wallet}.svg?style=score`,
+        metadataUri,
+      },
+      platform: {
+        name: 'spawnr.io',
+        costCovered: '0.01 SOL verification fee',
+      }
+    });
+    
+  } catch (error: any) {
+    console.error('[Spawnr Registration Error]', error);
+    return c.json({ 
+      error: 'Registration failed',
+      details: error.message,
+      support: 'contact@saidprotocol.com'
+    }, 500);
+  }
+});
+
 // ============ CARD HOSTING ============
 // Host agent cards for agents who don't have their own hosting
 
