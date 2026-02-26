@@ -946,6 +946,13 @@ app.post('/api/platforms/spawnr/register', async (c) => {
   const keyName = ['SPAWNR', 'PLATFORM', 'KEY'].join('_');
   const expectedKey = process.env[keyName];
   
+  console.log('[DEBUG] Auth check:', { 
+    hasApiKey: !!apiKey, 
+    hasExpectedKey: !!expectedKey,
+    keyName,
+    match: apiKey === expectedKey 
+  });
+  
   if (!expectedKey || !apiKey || apiKey !== expectedKey) {
     return c.json({ error: 'Invalid API key' }, 401);
   }
