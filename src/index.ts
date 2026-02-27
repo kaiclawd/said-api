@@ -1258,7 +1258,73 @@ app.post('/api/platforms/spawnr/confirm', async (c) => {
     });
     
   } catch (error: any) {
-    console.error('[Spawnr Confirm Error]', error);
+    console.error('[Spawnr Confirm Error]', error.message);
+    
+    // Recovery: if broadcast failed but agent exists on-chain, sync DB anyway
+    // This handles: expired blockhash retries, "already initialized" errors
+    try {
+      const agentPubkey = new PublicKey(wallet);
+      const [pda] = PublicKey.findProgramAddressSync(
+        [Buffer.from('agent'), agentPubkey.toBuffer()],
+        SAID_PROGRAM_ID
+      );
+      
+      const accountInfo = await connection.getAccountInfo(pda);
+      if (accountInfo) {
+        console.log('[Spawnr Recovery] Agent PDA exists on-chain, syncing DB...');
+        const metadataUri = `https://api.saidprotocol.com/api/cards/${wallet}.json`;
+        
+        const agent = await prisma.agent.upsert({
+          where: { wallet },
+          create: {
+            wallet,
+            pda: pda.toString(),
+            owner: wallet,
+            metadataUri,
+            registeredAt: new Date(),
+            isVerified: true,
+            verifiedAt: new Date(),
+            sponsored: true,
+            name: name || 'Spawnr Agent',
+            description: description || 'AI Agent via Spawnr',
+            twitter: twitter || undefined,
+            website: website || undefined,
+            skills: capabilities || ['chat', 'assistant'],
+            registrationSource: 'spawnr',
+            layer2Verified: true,
+            layer2VerifiedAt: new Date(),
+            l2AttestationMethod: 'platform',
+          },
+          update: {
+            isVerified: true,
+            verifiedAt: new Date(),
+            sponsored: true,
+            registrationSource: 'spawnr',
+            layer2Verified: true,
+            layer2VerifiedAt: new Date(),
+            l2AttestationMethod: 'platform',
+          },
+        });
+        
+        return c.json({
+          success: true,
+          message: 'Agent already registered on-chain. Database synced.',
+          recovered: true,
+          agent: {
+            wallet: agent.wallet,
+            pda: agent.pda,
+            name: agent.name,
+            verified: true,
+            onChain: true,
+            profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+            badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
+          },
+        });
+      }
+    } catch (recoveryError: any) {
+      console.error('[Spawnr Recovery Failed]', recoveryError.message);
+    }
+    
     return c.json({ 
       error: 'Broadcast failed',
       details: error.message,
