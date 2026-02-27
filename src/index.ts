@@ -3707,6 +3707,25 @@ app.delete('/admin/agent/:id', async (c) => {
   return c.json({ ok: true, deleted: id });
 });
 
+// Admin: bulk-tag agents by registration source
+app.post('/admin/tag-source', async (c) => {
+  if (!checkAdminAuth(c)) return c.json({ error: 'Unauthorized' }, 401);
+  const { wallets, registrationSource } = await c.req.json();
+  if (!wallets?.length || !registrationSource) return c.json({ error: 'Required: wallets[], registrationSource' }, 400);
+  
+  const result = await prisma.agent.updateMany({
+    where: { wallet: { in: wallets } },
+    data: { 
+      registrationSource,
+      layer2Verified: true,
+      layer2VerifiedAt: new Date(),
+      l2AttestationMethod: 'platform',
+      sponsored: true,
+    },
+  });
+  return c.json({ ok: true, updated: result.count });
+});
+
 app.post('/api/grants/apply', async (c) => {
   const body = await c.req.json();
   const { agentName, walletAddress, twitter, website, description, useCase, fundingAmount, fundingDuration, milestones, teamBackground } = body;
