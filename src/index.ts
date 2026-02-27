@@ -87,6 +87,53 @@ app.use('/*', cors({
   allowHeaders: ['Content-Type', 'Authorization'],
 }));
 
+// ============ SSE (Server-Sent Events) ============
+// Real-time notifications for frontend (new agents, verifications, etc.)
+
+import { EventEmitter } from 'events';
+const sseEmitter = new EventEmitter();
+sseEmitter.setMaxListeners(100); // support up to 100 concurrent SSE clients
+
+function emitAgentEvent(type: string, data: any) {
+  sseEmitter.emit('agent-event', { type, data, timestamp: Date.now() });
+}
+
+app.get('/api/events', (c) => {
+  const stream = new ReadableStream({
+    start(controller) {
+      const encoder = new TextEncoder();
+      
+      // Send keepalive every 30s
+      const keepalive = setInterval(() => {
+        try { controller.enqueue(encoder.encode(': keepalive\n\n')); } catch {}
+      }, 30000);
+      
+      const onEvent = (event: any) => {
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        } catch {}
+      };
+      
+      sseEmitter.on('agent-event', onEvent);
+      
+      // Cleanup on disconnect
+      c.req.raw.signal.addEventListener('abort', () => {
+        clearInterval(keepalive);
+        sseEmitter.off('agent-event', onEvent);
+      });
+    },
+  });
+  
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+    },
+  });
+});
+
 // Health check
 app.get('/', (c) => c.json({ status: 'ok', service: 'said-api', version: '1.0.0' }));
 app.get('/health', (c) => c.json({ status: 'healthy' }));
@@ -732,6 +779,8 @@ app.post('/api/register/sponsored', async (c) => {
       }
     });
     
+    emitAgentEvent('agent:registered', { wallet, name: card.name, source: 'sponsored' });
+    
     // Get remaining slots for response
     const remainingSlots = SPONSOR_POOL_MAX - (sponsorship.used + 1);
     
@@ -1235,6 +1284,9 @@ app.post('/api/platforms/spawnr/confirm', async (c) => {
       },
     });
     
+    // Emit SSE event for real-time frontend updates
+    emitAgentEvent('agent:registered', { wallet: agent.wallet, name: agent.name, source: 'spawnr', txHash });
+    
     return c.json({
       success: true,
       message: 'Agent registered and verified ON-CHAIN via Spawnr',
@@ -1305,6 +1357,8 @@ app.post('/api/platforms/spawnr/confirm', async (c) => {
             l2AttestationMethod: 'platform',
           },
         });
+        
+        emitAgentEvent('agent:registered', { wallet: agent.wallet, name: agent.name, source: 'spawnr', recovered: true });
         
         return c.json({
           success: true,
