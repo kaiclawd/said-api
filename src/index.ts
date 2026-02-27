@@ -1039,15 +1039,48 @@ app.post('/api/platforms/spawnr/register', async (c) => {
   
   const existingOnChain = await connection.getAccountInfo(pda);
   if (existingOnChain) {
-    // Already on-chain — check DB and return
-    const existing = await prisma.agent.findUnique({ where: { wallet } });
+    // Already on-chain — ensure DB is tagged as Spawnr and return
+    const existing = await prisma.agent.upsert({
+      where: { wallet },
+      create: {
+        wallet,
+        pda: pda.toString(),
+        owner: wallet,
+        metadataUri: `https://api.saidprotocol.com/api/cards/${wallet}.json`,
+        registeredAt: new Date(),
+        isVerified: true,
+        verifiedAt: new Date(),
+        sponsored: true,
+        name: name || 'Spawnr Agent',
+        description: description || 'AI Agent via Spawnr',
+        twitter: twitter || undefined,
+        website: website || undefined,
+        skills: capabilities || ['chat', 'assistant'],
+        registrationSource: 'spawnr',
+        layer2Verified: true,
+        layer2VerifiedAt: new Date(),
+        l2AttestationMethod: 'platform',
+      },
+      update: {
+        registrationSource: 'spawnr',
+        layer2Verified: true,
+        layer2VerifiedAt: new Date(),
+        l2AttestationMethod: 'platform',
+        sponsored: true,
+        isVerified: true,
+        verifiedAt: new Date(),
+      },
+    });
+    
+    emitAgentEvent('agent:registered', { wallet, name: existing.name, source: 'spawnr' });
+    
     return c.json({
       success: true,
       message: 'Agent already registered on-chain',
       agent: {
         wallet,
         pda: pda.toString(),
-        name: existing?.name || name,
+        name: existing.name || name,
         verified: true,
         profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
         badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
