@@ -1528,7 +1528,9 @@ app.post('/api/platforms/clawpump/register', async (c) => {
   }
   
   try {
-    const sponsorKeypair = Keypair.fromSecretKey(bs58.decode(sponsorKey));
+    // Trim whitespace from the key before decoding
+    const cleanedKey = sponsorKey.trim();
+    const sponsorKeypair = Keypair.fromSecretKey(bs58.decode(cleanedKey));
     
     // Store agent card first (needed for metadata_uri)
     const card = {
