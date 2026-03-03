@@ -175,7 +175,7 @@ app.get('/api/agents', async (c) => {
   const agents = await prisma.agent.findMany({
     where,
     orderBy,
-    take: Math.min(parseInt(limit || '50'), 100),
+    take: Math.min(parseInt(limit || '50'), 2000),
     skip: parseInt(offset || '0'),
     include: {
       _count: { select: { feedbackReceived: true } }
@@ -529,7 +529,7 @@ app.get('/api/leaderboard', async (c) => {
       })
       .filter(Boolean)
       .sort((a: any, b: any) => b.periodScore - a.periodScore)
-      .slice(0, Math.min(parseInt(limit || '50'), 100))
+      .slice(0, Math.min(parseInt(limit || '50'), 2000))
       .map((a, i) => ({ ...a, rank: i + 1 }));
     
     return c.json({ 
@@ -545,7 +545,7 @@ app.get('/api/leaderboard', async (c) => {
       feedbackCount: { gt: 0 }
     },
     orderBy: { reputationScore: 'desc' },
-    take: Math.min(parseInt(limit || '50'), 100),
+    take: Math.min(parseInt(limit || '50'), 2000),
     select: {
       wallet: true,
       pda: true,
@@ -3416,7 +3416,7 @@ app.get('/api/attestations/:wallet', async (c) => {
   const attestations = await prisma.attestation.findMany({
     where,
     orderBy: { createdAt: 'desc' },
-    take: Math.min(parseInt(limit || '50'), 100),
+    take: Math.min(parseInt(limit || '50'), 2000),
     skip: parseInt(offset || '0'),
     include: {
       attester: {
@@ -3472,7 +3472,7 @@ app.get('/api/attestations/:wallet/given', async (c) => {
   const attestations = await prisma.attestation.findMany({
     where,
     orderBy: { createdAt: 'desc' },
-    take: Math.min(parseInt(limit || '50'), 100),
+    take: Math.min(parseInt(limit || '50'), 2000),
     skip: parseInt(offset || '0'),
     include: {
       subject: {
