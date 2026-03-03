@@ -248,3 +248,34 @@ model WebhookConfig {
   
   @@index([platform])
 }
+
+model A2AMessage {
+  id          String   @id @default(cuid())
+  
+  // Routing
+  fromWallet  String
+  toWallet    String
+  
+  // Content
+  message     String   @db.Text
+  context     String?  @db.Text  // JSON
+  
+  // Task tracking
+  taskId      String?  @unique
+  status      String   @default("created")  // created, working, complete, failed
+  progress    Int      @default(0)
+  result      String?  @db.Text  // JSON
+  
+  // Verification
+  fromVerified Boolean @default(false)
+  signature   String?
+  
+  // Timestamps
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([toWallet])
+  @@index([fromWallet])
+  @@index([status])
+  @@index([createdAt])
+}
