@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { PrismaClient } from '@prisma/client';
-import type { AgentCard, A2AMessage, A2ATask, DiscoveryQuery } from './a2a-types';
+import type { AgentCard, A2AMessage, A2ATask, DiscoveryQuery } from './a2a-types.js';
 
 const prisma = new PrismaClient();
 const a2a = new Hono();

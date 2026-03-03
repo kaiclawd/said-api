@@ -28,7 +28,7 @@ import bs58 from 'bs58';
 import fs from 'fs/promises';
 import { Resend } from 'resend';
 
-import a2aRoutes from './a2a-endpoints';
+import a2aRoutes from './a2a-endpoints.js';
 // Verify a Solana wallet signature
 function verifySignature(message: string, signature: string, walletAddress: string): boolean {
   try {
