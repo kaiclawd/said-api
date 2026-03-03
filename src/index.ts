@@ -1519,7 +1519,7 @@ app.post('/api/platforms/clawpump/register', async (c) => {
   }
   
   // Check sponsor wallet (reuse same sponsor key as Spawnr)
-  const sponsorKey = process.env['SPONSOR_PRIVATE_KEY'];
+  const sponsorKey = process.env['SPAWNR_SPONSOR_PRIVATE_KEY'];
   if (!sponsorKey) {
     return c.json({ 
       error: 'Sponsor wallet not configured. Contact SAID team.',
@@ -1528,9 +1528,7 @@ app.post('/api/platforms/clawpump/register', async (c) => {
   }
   
   try {
-    // Trim whitespace from the key before decoding
-    const cleanedKey = sponsorKey.trim();
-    const sponsorKeypair = Keypair.fromSecretKey(bs58.decode(cleanedKey));
+    const sponsorKeypair = Keypair.fromSecretKey(bs58.decode(sponsorKey));
     
     // Store agent card first (needed for metadata_uri)
     const card = {
