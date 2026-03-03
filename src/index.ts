@@ -4463,6 +4463,463 @@ app.get('/api/agents/:wallet/passport', async (c) => {
   }
 });
 
+// ============ MULTI-WALLET ENDPOINTS ============
+
+/**
+ * POST /api/wallet/link
+ * Build transaction for linking a new wallet to an agent identity
+ * 
+ * Input: { agentWallet, newWallet }
+ * Output: Serialized transaction (both wallets must sign)
+ */
+app.post('/api/wallet/link', async (c) => {
+  const body = await c.req.json();
+  const { agentWallet, newWallet } = body;
+  
+  if (!agentWallet || !newWallet) {
+    return c.json({ error: 'Required: agentWallet, newWallet' }, 400);
+  }
+  
+  // Validate wallet addresses
+  let agentPubkey: PublicKey;
+  let newWalletPubkey: PublicKey;
+  try {
+    agentPubkey = new PublicKey(agentWallet);
+    newWalletPubkey = new PublicKey(newWallet);
+  } catch {
+    return c.json({ error: 'Invalid wallet address format' }, 400);
+  }
+  
+  // Check if agent exists
+  const agent = await prisma.agent.findUnique({ where: { wallet: agentWallet } });
+  if (!agent) {
+    return c.json({ error: 'Agent not found. Register first.' }, 404);
+  }
+  
+  // Check if new wallet is already linked
+  const existingLink = await prisma.walletLink.findUnique({ where: { wallet: newWallet } });
+  if (existingLink) {
+    return c.json({ error: 'Wallet is already linked to an agent' }, 409);
+  }
+  
+  try {
+    // Calculate PDAs
+    const [agentPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from('agent'), agentPubkey.toBuffer()],
+      SAID_PROGRAM_ID
+    );
+    
+    const [walletLinkPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from('wallet'), newWalletPubkey.toBuffer()],
+      SAID_PROGRAM_ID
+    );
+    
+    // Build link_wallet instruction
+    // Anchor discriminator: sha256("global:link_wallet")[0..8]
+    const discriminator = Buffer.from([200, 73, 238, 175, 165, 125, 153, 7]);
+    
+    const linkIx = {
+      programId: SAID_PROGRAM_ID,
+      keys: [
+        { pubkey: agentPda, isSigner: false, isWritable: false },       // agent_identity
+        { pubkey: walletLinkPda, isSigner: false, isWritable: true },   // wallet_link (init)
+        { pubkey: agentPubkey, isSigner: true, isWritable: true },      // authority (signer + payer)
+        { pubkey: newWalletPubkey, isSigner: true, isWritable: false }, // new_wallet (must sign)
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program
+      ],
+      data: discriminator,
+    };
+    
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+    
+    const tx = new Transaction({
+      blockhash,
+      lastValidBlockHeight,
+      feePayer: agentPubkey, // Agent wallet pays
+    });
+    
+    tx.add(linkIx);
+    
+    // Serialize - both wallets must sign
+    const serializedTx = tx.serialize({
+      requireAllSignatures: false,
+      verifySignatures: false,
+    }).toString('base64');
+    
+    return c.json({
+      success: true,
+      transaction: serializedTx,
+      blockhash,
+      lastValidBlockHeight,
+      requiredSigners: [agentWallet, newWallet],
+      walletLinkPda: walletLinkPda.toString(),
+      instructions: {
+        step1: 'Deserialize the transaction',
+        step2: 'Sign with BOTH wallets (agentWallet and newWallet)',
+        step3: 'Broadcast to the network',
+      },
+      expiresIn: '~60 seconds',
+    });
+  } catch (error: any) {
+    console.error('[Link Wallet Error]', error);
+    return c.json({ error: 'Failed to build transaction', details: error.message }, 500);
+  }
+});
+
+/**
+ * DELETE /api/wallet/link
+ * Build transaction for unlinking a wallet from an agent identity
+ * 
+ * Input: { agentWallet, walletToRemove }
+ * Output: Serialized transaction
+ */
+app.delete('/api/wallet/link', async (c) => {
+  const body = await c.req.json();
+  const { agentWallet, walletToRemove } = body;
+  
+  if (!agentWallet || !walletToRemove) {
+    return c.json({ error: 'Required: agentWallet, walletToRemove' }, 400);
+  }
+  
+  // Validate wallet addresses
+  let agentPubkey: PublicKey;
+  let removeWalletPubkey: PublicKey;
+  try {
+    agentPubkey = new PublicKey(agentWallet);
+    removeWalletPubkey = new PublicKey(walletToRemove);
+  } catch {
+    return c.json({ error: 'Invalid wallet address format' }, 400);
+  }
+  
+  // Check if agent exists
+  const agent = await prisma.agent.findUnique({ where: { wallet: agentWallet } });
+  if (!agent) {
+    return c.json({ error: 'Agent not found' }, 404);
+  }
+  
+  // Check if wallet is linked
+  const walletLink = await prisma.walletLink.findUnique({ where: { wallet: walletToRemove } });
+  if (!walletLink || walletLink.agentPda !== agent.pda) {
+    return c.json({ error: 'Wallet is not linked to this agent' }, 404);
+  }
+  
+  try {
+    // Calculate PDAs
+    const [agentPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from('agent'), agentPubkey.toBuffer()],
+      SAID_PROGRAM_ID
+    );
+    
+    const [walletLinkPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from('wallet'), removeWalletPubkey.toBuffer()],
+      SAID_PROGRAM_ID
+    );
+    
+    // Build unlink_wallet instruction
+    // Anchor discriminator: sha256("global:unlink_wallet")[0..8]
+    const discriminator = Buffer.from([222, 157, 120, 224, 146, 221, 191, 198]);
+    
+    const unlinkIx = {
+      programId: SAID_PROGRAM_ID,
+      keys: [
+        { pubkey: agentPda, isSigner: false, isWritable: false },       // agent_identity
+        { pubkey: walletLinkPda, isSigner: false, isWritable: true },   // wallet_link (close)
+        { pubkey: agentPubkey, isSigner: true, isWritable: true },      // caller (authority)
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program (implicit)
+      ],
+      data: discriminator,
+    };
+    
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+    
+    const tx = new Transaction({
+      blockhash,
+      lastValidBlockHeight,
+      feePayer: agentPubkey, // Agent wallet pays
+    });
+    
+    tx.add(unlinkIx);
+    
+    // Serialize
+    const serializedTx = tx.serialize({
+      requireAllSignatures: false,
+      verifySignatures: false,
+    }).toString('base64');
+    
+    return c.json({
+      success: true,
+      transaction: serializedTx,
+      blockhash,
+      lastValidBlockHeight,
+      requiredSigner: agentWallet,
+      instructions: {
+        step1: 'Deserialize the transaction',
+        step2: 'Sign with the agent wallet (authority)',
+        step3: 'Broadcast to the network',
+      },
+      expiresIn: '~60 seconds',
+    });
+  } catch (error: any) {
+    console.error('[Unlink Wallet Error]', error);
+    return c.json({ error: 'Failed to build transaction', details: error.message }, 500);
+  }
+});
+
+/**
+ * POST /api/wallet/transfer-authority
+ * Build transaction to transfer authority to a linked wallet
+ * 
+ * Input: { agentWallet, linkedWallet }
+ * Output: Serialized transaction
+ */
+app.post('/api/wallet/transfer-authority', async (c) => {
+  const body = await c.req.json();
+  const { agentWallet, linkedWallet } = body;
+  
+  if (!agentWallet || !linkedWallet) {
+    return c.json({ error: 'Required: agentWallet, linkedWallet' }, 400);
+  }
+  
+  // Validate wallet addresses
+  let agentPubkey: PublicKey;
+  let linkedWalletPubkey: PublicKey;
+  try {
+    agentPubkey = new PublicKey(agentWallet);
+    linkedWalletPubkey = new PublicKey(linkedWallet);
+  } catch {
+    return c.json({ error: 'Invalid wallet address format' }, 400);
+  }
+  
+  // Check if agent exists
+  const agent = await prisma.agent.findUnique({ where: { wallet: agentWallet } });
+  if (!agent) {
+    return c.json({ error: 'Agent not found' }, 404);
+  }
+  
+  // Check if wallet is linked
+  const walletLink = await prisma.walletLink.findUnique({ where: { wallet: linkedWallet } });
+  if (!walletLink || walletLink.agentPda !== agent.pda) {
+    return c.json({ error: 'Wallet is not linked to this agent. Must link first.' }, 404);
+  }
+  
+  try {
+    // Calculate PDAs
+    const [agentPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from('agent'), agentPubkey.toBuffer()],
+      SAID_PROGRAM_ID
+    );
+    
+    const [walletLinkPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from('wallet'), linkedWalletPubkey.toBuffer()],
+      SAID_PROGRAM_ID
+    );
+    
+    // Build transfer_authority instruction
+    // Anchor discriminator: sha256("global:transfer_authority")[0..8]
+    const discriminator = Buffer.from([101, 245, 179, 178, 230, 198, 76, 163]);
+    
+    const transferIx = {
+      programId: SAID_PROGRAM_ID,
+      keys: [
+        { pubkey: agentPda, isSigner: false, isWritable: true },        // agent_identity (mut)
+        { pubkey: walletLinkPda, isSigner: false, isWritable: false },  // wallet_link
+        { pubkey: linkedWalletPubkey, isSigner: true, isWritable: false }, // new_authority (must sign)
+      ],
+      data: discriminator,
+    };
+    
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+    
+    const tx = new Transaction({
+      blockhash,
+      lastValidBlockHeight,
+      feePayer: linkedWalletPubkey, // New authority pays
+    });
+    
+    tx.add(transferIx);
+    
+    // Serialize
+    const serializedTx = tx.serialize({
+      requireAllSignatures: false,
+      verifySignatures: false,
+    }).toString('base64');
+    
+    return c.json({
+      success: true,
+      transaction: serializedTx,
+      blockhash,
+      lastValidBlockHeight,
+      requiredSigner: linkedWallet,
+      warning: 'This will transfer authority! The linked wallet becomes the new admin.',
+      instructions: {
+        step1: 'Deserialize the transaction',
+        step2: 'Sign with the linked wallet',
+        step3: 'Broadcast to the network',
+      },
+      expiresIn: '~60 seconds',
+    });
+  } catch (error: any) {
+    console.error('[Transfer Authority Error]', error);
+    return c.json({ error: 'Failed to build transaction', details: error.message }, 500);
+  }
+});
+
+/**
+ * GET /api/agent/resolve/:wallet
+ * Given ANY wallet, find the agent identity it belongs to
+ * 
+ * Checks:
+ * 1. If wallet is a primary owner (agent PDA lookup)
+ * 2. If wallet is linked (wallet link PDA lookup)
+ * 
+ * Returns the agent identity data
+ */
+app.get('/api/agent/resolve/:wallet', async (c) => {
+  const wallet = c.req.param('wallet');
+  
+  // Validate wallet address
+  let walletPubkey: PublicKey;
+  try {
+    walletPubkey = new PublicKey(wallet);
+  } catch {
+    return c.json({ error: 'Invalid wallet address format' }, 400);
+  }
+  
+  try {
+    // Step 1: Check if wallet is a primary owner
+    const agent = await prisma.agent.findUnique({ 
+      where: { wallet },
+      include: {
+        feedbackReceived: {
+          orderBy: { createdAt: 'desc' },
+          take: 5,
+        },
+        _count: { select: { feedbackReceived: true } }
+      }
+    });
+    
+    if (agent) {
+      // Found as primary owner
+      return c.json({
+        resolved: true,
+        type: 'primary',
+        wallet,
+        agent: {
+          ...agent,
+          profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+          badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
+        }
+      });
+    }
+    
+    // Step 2: Check if wallet is linked
+    const walletLink = await prisma.walletLink.findUnique({
+      where: { wallet }
+    });
+    
+    if (walletLink) {
+      // Found as linked wallet - fetch the primary agent
+      const primaryAgent = await prisma.agent.findUnique({
+        where: { pda: walletLink.agentPda },
+        include: {
+          feedbackReceived: {
+            orderBy: { createdAt: 'desc' },
+            take: 5,
+          },
+          _count: { select: { feedbackReceived: true } }
+        }
+      });
+      
+      if (primaryAgent) {
+        return c.json({
+          resolved: true,
+          type: 'linked',
+          wallet,
+          linkedTo: primaryAgent.wallet,
+          agent: {
+            ...primaryAgent,
+            profile: `https://www.saidprotocol.com/agent.html?wallet=${primaryAgent.wallet}`,
+            badge: `https://api.saidprotocol.com/api/badge/${primaryAgent.wallet}.svg`,
+          }
+        });
+      }
+    }
+    
+    // Not found
+    return c.json({
+      resolved: false,
+      wallet,
+      message: 'Wallet is not registered as an agent or linked to any agent',
+      help: 'Register at https://www.saidprotocol.com/register'
+    }, 404);
+    
+  } catch (error: any) {
+    console.error('[Resolve Wallet Error]', error);
+    return c.json({ error: 'Failed to resolve wallet', details: error.message }, 500);
+  }
+});
+
+/**
+ * GET /api/agent/:wallet/wallets
+ * List all linked wallets for an agent
+ * 
+ * Returns primary wallet + all linked wallets
+ */
+app.get('/api/agent/:wallet/wallets', async (c) => {
+  const wallet = c.req.param('wallet');
+  
+  // Validate wallet address
+  let walletPubkey: PublicKey;
+  try {
+    walletPubkey = new PublicKey(wallet);
+  } catch {
+    return c.json({ error: 'Invalid wallet address format' }, 400);
+  }
+  
+  try {
+    // Find the agent
+    const agent = await prisma.agent.findUnique({ where: { wallet } });
+    if (!agent) {
+      return c.json({ error: 'Agent not found' }, 404);
+    }
+    
+    // Find all linked wallets
+    const linkedWallets = await prisma.walletLink.findMany({
+      where: { agentPda: agent.pda },
+      orderBy: { linkedAt: 'asc' }
+    });
+    
+    return c.json({
+      agent: {
+        wallet: agent.wallet,
+        pda: agent.pda,
+        name: agent.name,
+        profile: `https://www.saidprotocol.com/agent.html?wallet=${agent.wallet}`,
+      },
+      wallets: {
+        primary: {
+          wallet: agent.wallet,
+          type: 'primary',
+          isPermanent: true,
+          isAuthority: true, // Assume true unless we track authority separately
+        },
+        linked: linkedWallets.map(wl => ({
+          wallet: wl.wallet,
+          pda: wl.pda,
+          type: 'linked',
+          linkedAt: wl.linkedAt,
+          isAuthority: false, // Could be true if authority was transferred
+        })),
+      },
+      totalWallets: 1 + linkedWallets.length,
+    });
+    
+  } catch (error: any) {
+    console.error('[List Wallets Error]', error);
+    return c.json({ error: 'Failed to list wallets', details: error.message }, 500);
+  }
+});
+
 // ============ START ============
 
 const port = parseInt(process.env.PORT || '3001');

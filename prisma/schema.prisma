@@ -279,3 +279,19 @@ model A2AMessage {
   @@index([status])
   @@index([createdAt])
 }
+
+model WalletLink {
+  id          String   @id @default(cuid())
+  
+  // On-chain state (cache)
+  pda         String   @unique
+  agentPda    String   // Points to Agent.pda
+  wallet      String   @unique
+  
+  // Metadata
+  linkedAt    DateTime @default(now())
+  lastSynced  DateTime @default(now())
+  
+  @@index([wallet])
+  @@index([agentPda])
+}
