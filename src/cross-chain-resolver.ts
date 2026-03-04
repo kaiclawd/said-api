@@ -52,10 +52,36 @@ export async function resolveERC8004Agent(address: string, chain: string): Promi
 
     if (count === 0) return [];
 
-    // Get all token IDs owned by this address
-    for (let i = 0; i < Math.min(count, 10); i++) {
+    // ERC-8004 doesn't implement Enumerable, so use Transfer events to find token IDs
+    const provider = getProvider(chain);
+    const filter = registry.filters.Transfer(null, address);
+    
+    // Search last ~500k blocks (~70 days on ETH) for transfers TO this address
+    const currentBlock = await provider.getBlockNumber();
+    const fromBlock = Math.max(0, currentBlock - 500000);
+    
+    let tokenIds: number[] = [];
+    try {
+      const events = await registry.queryFilter(filter, fromBlock, 'latest');
+      // Get unique token IDs, then verify current ownership
+      const candidates = [...new Set(events.map((e: any) => Number(e.args?.[2] || e.args?.tokenId)))];
+      for (const tid of candidates) {
+        try {
+          const currentOwner = await registry.ownerOf(tid);
+          if (currentOwner.toLowerCase() === address.toLowerCase()) {
+            tokenIds.push(tid);
+          }
+        } catch (e) {}
+      }
+    } catch (e) {
+      // If event query fails (some RPCs limit this), try known token IDs won't work
+      // Fallback: we know they have `count` tokens but can't enumerate them
+      console.warn(`[ERC8004] Event query failed for ${address} on ${chain}, skipping enumeration`);
+      return [];
+    }
+
+    for (const tokenId of tokenIds.slice(0, 10)) {
       try {
-        const tokenId = await registry.tokenOfOwnerByIndex(address, i);
         const tokenUri = await registry.tokenURI(tokenId);
         
         // Fetch metadata from URI
@@ -104,7 +130,7 @@ export async function resolveERC8004Agent(address: string, chain: string): Promi
           raw: metadata,
         });
       } catch (e) {
-        console.warn(`[ERC8004] Error reading token ${i} for ${address} on ${chain}:`, e);
+        console.warn(`[ERC8004] Error reading token ${tokenId} for ${address} on ${chain}:`, e);
       }
     }
   } catch (e) {
@@ -265,9 +291,19 @@ export async function resolveAgent(address: string, chain?: string): Promise<Uni
 
 export async function getERC8004Stats(chain: string): Promise<{ totalSupply: number } | null> {
   try {
+    // ERC-8004 doesn't have totalSupply, estimate from recent Transfer events
+    const provider = getProvider(chain);
     const registry = getIdentityRegistry(chain);
-    const supply = await registry.totalSupply();
-    return { totalSupply: Number(supply) };
+    const currentBlock = await provider.getBlockNumber();
+    // Check for any mint events (from address(0)) in last 100k blocks
+    const filter = registry.filters.Transfer('0x0000000000000000000000000000000000000000');
+    const events = await registry.queryFilter(filter, Math.max(0, currentBlock - 100000), 'latest');
+    // Rough estimate: highest token ID seen
+    const maxTokenId = events.reduce((max: number, e: any) => {
+      const tid = Number(e.args?.[2] || 0);
+      return tid > max ? tid : max;
+    }, 0);
+    return { totalSupply: maxTokenId };
   } catch (e) {
     return null;
   }
