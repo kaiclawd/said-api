@@ -11,7 +11,7 @@ import type { Context, Next } from 'hono';
 // ── Config ──────────────────────────────────────────────────────────────────
 
 // SAID Protocol treasury wallet (Solana)
-export const SAID_TREASURY = process.env.SAID_TREASURY_WALLET || 'EK3mP45iwgDEEts2cEDfhAs2i4PrH63NMG7vHg2d6fas';
+export const SAID_TREASURY = process.env.SAID_X402_TREASURY || 'EK3mP45iwgDEEts2cEDfhAs2i4PrH63NMG7vHg2d6fas';
 
 // EVM treasury wallet (receives USDC on EVM chains)
 export const SAID_EVM_TREASURY = process.env.SAID_EVM_TREASURY || '';
