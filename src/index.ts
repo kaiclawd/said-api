@@ -53,6 +53,13 @@ config();
 
 const prisma = new PrismaClient();
 const app = new Hono();
+
+// Global error handler — catch and log all errors
+app.onError((err, c) => {
+  console.error(`[Hono Error] ${c.req.method} ${c.req.path}:`, err.message, err.stack?.split('\n').slice(0, 3).join('\n'));
+  return c.json({ error: 'Internal Server Error', details: err.message }, 500);
+});
+
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 
 // Helper: decode base64-encoded platform API keys (bypasses Railway env var scanner)

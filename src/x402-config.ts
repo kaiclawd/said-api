@@ -100,19 +100,18 @@ export function createX402Middleware() {
   const acceptOptions: Array<{ scheme: 'exact'; network: `${string}:${string}`; price: string; payTo: string }> = [solanaOption];
 
   // Add EVM chains if treasury is configured
+  // Only Base for now — SDK has built-in USDC address for Base
+  // Other chains need custom money parsers for USDC addresses
   if (SAID_EVM_TREASURY && !SAID_EVM_TREASURY.startsWith('0x000000000')) {
-    const evmChains = Object.entries(CHAINS).filter(([name]) => name !== 'solana');
-    for (const [_, network] of evmChains) {
-      acceptOptions.push({
-        scheme: 'exact' as const,
-        network,
-        price: MESSAGE_PRICE_USDC,
-        payTo: SAID_EVM_TREASURY,
-      });
-    }
-    console.log(`✅ EVM payment chains enabled: ${evmChains.map(([n]) => n).join(', ')}`);
+    acceptOptions.push({
+      scheme: 'exact' as const,
+      network: CHAINS.base,
+      price: MESSAGE_PRICE_USDC,
+      payTo: SAID_EVM_TREASURY,
+    });
+    console.log('✅ EVM payment enabled: Base (USDC)');
   } else {
-    console.log('ℹ️  EVM payment chains disabled (set SAID_EVM_TREASURY to enable)');
+    console.log('ℹ️  EVM payment disabled (set SAID_EVM_TREASURY to enable)');
   }
 
   const routes = {
@@ -141,11 +140,14 @@ export function createX402Middleware() {
         console.log(`🆓 Free tier: ${senderAddress} (${info.remaining} left today)`);
         return { grantAccess: true };
       }
-    } catch {
-      // Can't parse body — require payment
+    } catch (e) {
+      console.warn('[x402 free tier] Body parse error:', e);
     }
+    console.log('[x402] No free tier — requiring payment');
     return undefined; // Continue to x402 payment check
   });
+
+  console.log('[x402] Middleware created, will initialize on first request');
 
   return paymentMiddlewareFromHTTPServer(httpServer);
 }
