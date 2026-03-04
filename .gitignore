@@ -5,3 +5,4 @@ dist/
 .DS_Store
 test-keypair.json
 test-x402*.ts
+test-keypair-v2.json
