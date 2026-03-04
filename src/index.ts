@@ -29,6 +29,7 @@ import fs from 'fs/promises';
 import { Resend } from 'resend';
 
 import a2aRoutes from './a2a-endpoints.js';
+import crossChainRoutes from './cross-chain-endpoints.js';
 // Verify a Solana wallet signature
 function verifySignature(message: string, signature: string, walletAddress: string): boolean {
   try {
@@ -4929,6 +4930,9 @@ syncAgentsFromChain();
 // Mount A2A routes
 app.route('/a2a', a2aRoutes);
 console.log('✅ A2A Protocol endpoints mounted');
+
+app.route('/xchain', crossChainRoutes);
+console.log('✅ Cross-Chain Communication endpoints mounted');
 setInterval(syncAgentsFromChain, 5 * 60 * 1000);
 
 serve({ fetch: app.fetch, port }, (info) => {
