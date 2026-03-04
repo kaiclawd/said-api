@@ -52,18 +52,17 @@ export async function resolveERC8004Agent(address: string, chain: string): Promi
 
     if (count === 0) return [];
 
-    // ERC-8004 doesn't implement Enumerable, so use Transfer events to find token IDs
+    // ERC-8004 doesn't implement Enumerable
+    // Strategy: Use Transfer events from recent blocks, with small range to stay within free RPC limits
     const provider = getProvider(chain);
     const filter = registry.filters.Transfer(null, address);
     
-    // Search last ~500k blocks (~70 days on ETH) for transfers TO this address
-    const currentBlock = await provider.getBlockNumber();
-    const fromBlock = Math.max(0, currentBlock - 500000);
-    
     let tokenIds: number[] = [];
     try {
+      const currentBlock = await provider.getBlockNumber();
+      // Only scan last 50k blocks (~7 days on ETH) to stay within free RPC limits
+      const fromBlock = Math.max(0, currentBlock - 50000);
       const events = await registry.queryFilter(filter, fromBlock, 'latest');
-      // Get unique token IDs, then verify current ownership
       const candidates = [...new Set(events.map((e: any) => Number(e.args?.[2] || e.args?.tokenId)))];
       for (const tid of candidates) {
         try {
@@ -74,10 +73,23 @@ export async function resolveERC8004Agent(address: string, chain: string): Promi
         } catch (e) {}
       }
     } catch (e) {
-      // If event query fails (some RPCs limit this), try known token IDs won't work
-      // Fallback: we know they have `count` tokens but can't enumerate them
-      console.warn(`[ERC8004] Event query failed for ${address} on ${chain}, skipping enumeration`);
-      return [];
+      console.warn(`[ERC8004] Event query failed for ${address} on ${chain}:`, (e as any).message?.substring(0, 100));
+    }
+
+    // If we found no tokens via events but balance > 0, return a minimal agent card
+    if (tokenIds.length === 0 && count > 0) {
+      agents.push({
+        address,
+        chain: chain as Chain,
+        source: 'erc8004',
+        name: `ERC-8004 Agent`,
+        description: `Registered agent on ${chain} with ${count} identity token(s)`,
+        capabilities: [],
+        verified: true,
+        reputationScore: 0,
+        owner: address,
+      });
+      return agents;
     }
 
     for (const tokenId of tokenIds.slice(0, 10)) {
