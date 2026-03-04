@@ -282,10 +282,15 @@ crossChain.post('/message', async (c) => {
       });
     }
 
+    // Check if this was a paid request (payment header present = x402 settled)
+    const paymentHeader = c.req.header('payment-signature') || c.req.header('x-payment');
+    const isPaid = !!paymentHeader;
+
     return c.json({
       success: true,
       messageId,
       status: delivered || webhookDelivered ? 'delivered' : 'stored',
+      paid: isPaid,
       deliveredVia: [
         ...(delivered ? ['a2a'] : []),
         ...(webhookDelivered ? ['webhook'] : []),

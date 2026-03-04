@@ -149,6 +149,13 @@ export function createX402Middleware() {
 
   // Free tier hook: grant access if sender has remaining free messages
   httpServer.onProtectedRequest(async (context) => {
+    // If client explicitly sent a payment signature, skip free tier — they want to pay
+    const paymentHeader = context.adapter.getHeader?.('payment-signature') || context.adapter.getHeader?.('x-payment');
+    if (paymentHeader) {
+      console.log('[x402] Payment signature present — skipping free tier, processing payment');
+      return undefined; // Continue to x402 payment settlement
+    }
+
     try {
       const body = await context.adapter.getBody?.() as any;
       const senderAddress = body?.from?.address;
