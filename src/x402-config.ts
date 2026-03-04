@@ -32,8 +32,17 @@ const CHAINS = {
   xlayer: 'eip155:196' as const,
 };
 
-// PayAI facilitator
+// Official USDC addresses from Circle (https://developers.circle.com/stablecoins/usdc-contract-addresses)
+const USDC_ADDRESSES: Record<string, { address: string; decimals: number }> = {
+  'eip155:8453':  { address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', decimals: 6 }, // Base
+  'eip155:137':   { address: '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359', decimals: 6 }, // Polygon
+  'eip155:43114': { address: '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E', decimals: 6 }, // Avalanche
+  'eip155:1329':  { address: '0xe15fC38F6D8c56aF07bbCBe3BAf5708A2Bf42392', decimals: 6 }, // Sei
+};
+
+// Facilitators (PayAI for wide chain support, Dexter for battle-tested Solana+Base)
 const PAYAI_FACILITATOR_URL = 'https://facilitator.payai.network';
+const DEXTER_FACILITATOR_URL = 'https://x402.dexter.cash';
 
 // ── Free Tier ───────────────────────────────────────────────────────────────
 
@@ -85,9 +94,9 @@ function getFreeTierInfo(address: string): { used: number; remaining: number; li
  *   3. Supports Solana + EVM chains via PayAI facilitator
  */
 export function createX402Middleware() {
-  const facilitator = new HTTPFacilitatorClient({
-    url: PAYAI_FACILITATOR_URL,
-  });
+  // PayAI first (wider chain support), Dexter as fallback (battle-tested, 3.2M+ settlements)
+  const payai = new HTTPFacilitatorClient({ url: PAYAI_FACILITATOR_URL });
+  const dexter = new HTTPFacilitatorClient({ url: DEXTER_FACILITATOR_URL });
 
   // Build payment options
   const solanaOption = {
@@ -100,16 +109,17 @@ export function createX402Middleware() {
   const acceptOptions: Array<{ scheme: 'exact'; network: `${string}:${string}`; price: string; payTo: string }> = [solanaOption];
 
   // Add EVM chains if treasury is configured
-  // Only Base for now — SDK has built-in USDC address for Base
-  // Other chains need custom money parsers for USDC addresses
+  const evmChains = ['base', 'polygon', 'avalanche', 'sei'] as const;
   if (SAID_EVM_TREASURY && !SAID_EVM_TREASURY.startsWith('0x000000000')) {
-    acceptOptions.push({
-      scheme: 'exact' as const,
-      network: CHAINS.base,
-      price: MESSAGE_PRICE_USDC,
-      payTo: SAID_EVM_TREASURY,
-    });
-    console.log('✅ EVM payment enabled: Base (USDC)');
+    for (const chain of evmChains) {
+      acceptOptions.push({
+        scheme: 'exact' as const,
+        network: CHAINS[chain],
+        price: MESSAGE_PRICE_USDC,
+        payTo: SAID_EVM_TREASURY,
+      });
+    }
+    console.log(`✅ EVM payment enabled: ${evmChains.join(', ')}`);
   } else {
     console.log('ℹ️  EVM payment disabled (set SAID_EVM_TREASURY to enable)');
   }
@@ -122,9 +132,18 @@ export function createX402Middleware() {
   };
 
   // Create the resource server manually so we can add the free tier hook
-  const resourceServer = new x402ResourceServer([facilitator]);
+  const resourceServer = new x402ResourceServer([payai, dexter]);
   resourceServer.register('solana:*' as any, new ExactSvmScheme());
-  resourceServer.register('eip155:*' as any, new ExactEvmScheme());
+
+  // EVM scheme with custom USDC addresses for chains the SDK doesn't know about
+  const evmScheme = new ExactEvmScheme();
+  evmScheme.registerMoneyParser(async (amount: number, network: string) => {
+    const usdc = USDC_ADDRESSES[network];
+    if (!usdc) return null; // Fall back to SDK default
+    const tokenAmount = Math.round(amount * Math.pow(10, usdc.decimals)).toString();
+    return { amount: tokenAmount, asset: usdc.address };
+  });
+  resourceServer.register('eip155:*' as any, evmScheme);
 
   const httpServer = new x402HTTPResourceServer(resourceServer, routes);
 
