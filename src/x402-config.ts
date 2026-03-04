@@ -36,6 +36,8 @@ export function createX402Middleware() {
     {
       appName: 'SAID Protocol — Cross-Chain Agent Communication',
     },
+    undefined, // no custom paywall provider
+    false, // don't sync with facilitator on start
   );
 }
 
