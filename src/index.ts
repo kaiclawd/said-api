@@ -30,6 +30,7 @@ import { Resend } from 'resend';
 
 import a2aRoutes from './a2a-endpoints.js';
 import crossChainRoutes from './cross-chain-endpoints.js';
+import { createX402Middleware } from './x402-config.js';
 // Verify a Solana wallet signature
 function verifySignature(message: string, signature: string, walletAddress: string): boolean {
   try {
@@ -4930,6 +4931,15 @@ syncAgentsFromChain();
 // Mount A2A routes
 app.route('/a2a', a2aRoutes);
 console.log('✅ A2A Protocol endpoints mounted');
+
+// x402 payment middleware for cross-chain messaging
+try {
+  const x402 = createX402Middleware();
+  app.use('/xchain/message', x402);
+  console.log('✅ x402 payment middleware active on /xchain/message ($0.01/message)');
+} catch (e) {
+  console.warn('⚠️ x402 middleware failed to initialize, messages will be free:', (e as any).message);
+}
 
 app.route('/xchain', crossChainRoutes);
 console.log('✅ Cross-Chain Communication endpoints mounted');
