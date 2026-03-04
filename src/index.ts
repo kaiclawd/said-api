@@ -4933,9 +4933,19 @@ app.route('/a2a', a2aRoutes);
 console.log('✅ A2A Protocol endpoints mounted');
 
 // x402 payment middleware for cross-chain messaging
+// Wrapped in try-catch — if x402 fails to init, messages go through free
+let x402Enabled = false;
 try {
   const x402 = createX402Middleware();
-  app.use('/xchain/message', x402);
+  app.use('/xchain/message', async (c, next) => {
+    try {
+      return await x402(c, next);
+    } catch (e) {
+      console.warn('[x402] Payment middleware error, allowing free message:', (e as any).message?.substring(0, 100));
+      await next();
+    }
+  });
+  x402Enabled = true;
   console.log('✅ x402 payment middleware active on /xchain/message ($0.01/message)');
 } catch (e) {
   console.warn('⚠️ x402 middleware failed to initialize, messages will be free:', (e as any).message);
