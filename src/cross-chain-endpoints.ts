@@ -236,37 +236,46 @@ crossChain.post('/message', async (c) => {
 
     console.log(`[XChain Message] ${sender.name} (${from.chain}) → ${recipient.name} (${to.chain}): ${message.substring(0, 80)}`);
 
-    // If recipient has an A2A endpoint, try to deliver
+    // Build delivery payload
+    const deliveryPayload = {
+      from: {
+        address: from.address,
+        chain: from.chain,
+        name: sender.name,
+        verified: sender.verified,
+        reputation: sender.reputationScore,
+        source: sender.source,
+      },
+      message,
+      context,
+      messageId,
+      protocol: 'said-xchain-v1',
+      timestamp: new Date().toISOString(),
+    };
+
+    // Try delivery: A2A endpoint first, then webhook
     let delivered = false;
+    
+    // 1. A2A endpoint delivery
     if (recipient.endpoint) {
       try {
         const deliveryRes = await fetch(recipient.endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            from: {
-              address: from.address,
-              chain: from.chain,
-              name: sender.name,
-              verified: sender.verified,
-              reputation: sender.reputationScore,
-              source: sender.source,
-            },
-            message,
-            context,
-            messageId,
-            protocol: 'said-xchain-v1',
-          }),
+          body: JSON.stringify(deliveryPayload),
           signal: AbortSignal.timeout(10000),
         });
         delivered = deliveryRes.ok;
       } catch (e) {
-        console.warn(`[XChain] Delivery to ${recipient.endpoint} failed:`, e);
+        console.warn(`[XChain] A2A delivery to ${recipient.endpoint} failed:`, e);
       }
     }
 
+    // 2. Webhook delivery (even if A2A succeeded — both can receive)
+    const webhookDelivered = await deliverToWebhook(to.chain, to.address, deliveryPayload);
+
     // Update status
-    if (delivered) {
+    if (delivered || webhookDelivered) {
       await prisma.a2AMessage.update({
         where: { taskId: messageId },
         data: { status: 'routed' },
@@ -276,7 +285,11 @@ crossChain.post('/message', async (c) => {
     return c.json({
       success: true,
       messageId,
-      status: delivered ? 'delivered' : 'stored',
+      status: delivered || webhookDelivered ? 'delivered' : 'stored',
+      deliveredVia: [
+        ...(delivered ? ['a2a'] : []),
+        ...(webhookDelivered ? ['webhook'] : []),
+      ],
       from: {
         address: from.address,
         chain: from.chain,
@@ -403,6 +416,148 @@ crossChain.get('/chains', (c) => {
     chains,
     count: chains.length,
     protocol: 'said-xchain-v1',
+  });
+});
+
+// ═══════════════════════════════════════════════════════
+// WEBHOOKS — Push delivery for cross-chain messages
+// ═══════════════════════════════════════════════════════
+
+// In-memory webhook store (TODO: persist to DB)
+const webhooks = new Map<string, { url: string; secret?: string; createdAt: number }>();
+
+function getWebhookKey(chain: string, address: string): string {
+  return `${chain}:${address.toLowerCase()}`;
+}
+
+/**
+ * POST /xchain/webhook
+ * Register a webhook URL to receive messages for your agent
+ * 
+ * Body: { chain, address, url, secret? }
+ */
+crossChain.post('/webhook', async (c) => {
+  try {
+    const { chain, address, url, secret } = await c.req.json();
+    
+    if (!chain || !address || !url) {
+      return c.json({ error: 'Missing required fields: chain, address, url' }, 400);
+    }
+
+    // Validate URL
+    try { new URL(url); } catch { return c.json({ error: 'Invalid webhook URL' }, 400); }
+
+    const key = getWebhookKey(chain, address);
+    webhooks.set(key, { url, secret, createdAt: Date.now() });
+
+    console.log(`[Webhook] Registered ${url} for ${chain}:${address}`);
+
+    return c.json({
+      success: true,
+      webhook: { chain, address, url, hasSecret: !!secret },
+      message: 'Webhook registered. You will receive POST requests when messages arrive.',
+    });
+  } catch (error: any) {
+    return c.json({ error: 'Failed to register webhook', details: error.message }, 500);
+  }
+});
+
+/**
+ * GET /xchain/webhook/:chain/:address
+ * Check webhook registration for an agent
+ */
+crossChain.get('/webhook/:chain/:address', (c) => {
+  const { chain, address } = c.req.param();
+  const key = getWebhookKey(chain, address);
+  const hook = webhooks.get(key);
+
+  if (!hook) {
+    return c.json({ registered: false, chain, address });
+  }
+
+  return c.json({
+    registered: true,
+    chain,
+    address,
+    url: hook.url,
+    hasSecret: !!hook.secret,
+    registeredAt: new Date(hook.createdAt).toISOString(),
+  });
+});
+
+/**
+ * DELETE /xchain/webhook/:chain/:address
+ * Remove webhook registration
+ */
+crossChain.delete('/webhook/:chain/:address', (c) => {
+  const { chain, address } = c.req.param();
+  const key = getWebhookKey(chain, address);
+  const existed = webhooks.delete(key);
+
+  return c.json({ success: true, removed: existed });
+});
+
+/**
+ * Deliver message to webhook if registered
+ * Called from the message handler after storing
+ */
+export async function deliverToWebhook(
+  chain: string,
+  address: string,
+  payload: Record<string, unknown>,
+): Promise<boolean> {
+  const key = getWebhookKey(chain, address);
+  const hook = webhooks.get(key);
+  if (!hook) return false;
+
+  try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (hook.secret) {
+      // Simple HMAC signature for webhook verification
+      const crypto = await import('crypto');
+      const sig = crypto.createHmac('sha256', hook.secret)
+        .update(JSON.stringify(payload))
+        .digest('hex');
+      headers['X-SAID-Signature'] = sig;
+    }
+
+    const res = await fetch(hook.url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(10000),
+    });
+
+    console.log(`[Webhook] Delivered to ${hook.url}: ${res.status}`);
+    return res.ok;
+  } catch (e) {
+    console.warn(`[Webhook] Delivery to ${hook.url} failed:`, e);
+    return false;
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// FREE TIER INFO
+// ═══════════════════════════════════════════════════════
+
+import { getFreeTierInfo, CHAINS as PAYMENT_CHAINS, FREE_MESSAGES_PER_DAY, MESSAGE_PRICE } from './x402-config.js';
+
+/**
+ * GET /xchain/free-tier/:address
+ * Check free tier usage for an agent address
+ */
+crossChain.get('/free-tier/:address', (c) => {
+  const { address } = c.req.param();
+  const info = getFreeTierInfo(address);
+
+  return c.json({
+    address,
+    ...info,
+    paidPrice: MESSAGE_PRICE,
+    paymentChains: Object.entries(PAYMENT_CHAINS).map(([name, caip2]) => ({
+      name,
+      network: caip2,
+    })),
   });
 });
 

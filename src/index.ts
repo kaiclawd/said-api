@@ -30,7 +30,7 @@ import { Resend } from 'resend';
 
 import a2aRoutes from './a2a-endpoints.js';
 import crossChainRoutes from './cross-chain-endpoints.js';
-import { createX402Middleware } from './x402-config.js';
+import { createX402Middleware, getFreeTierInfo, CHAINS, FREE_MESSAGES_PER_DAY, MESSAGE_PRICE } from './x402-config.js';
 // Verify a Solana wallet signature
 function verifySignature(message: string, signature: string, walletAddress: string): boolean {
   try {
@@ -4933,8 +4933,11 @@ app.route('/a2a', a2aRoutes);
 console.log('✅ A2A Protocol endpoints mounted');
 
 // x402 payment middleware for cross-chain messaging (Coinbase SDK + PayAI Facilitator)
+// Includes built-in free tier: 10 messages/day per agent
 app.use('*', createX402Middleware());
-console.log('✅ x402 payment gate active on POST /xchain/message ($0.01 USDC via Coinbase x402 SDK)');
+console.log(`✅ x402 payment gate active on POST /xchain/message ($0.01 USDC via Coinbase x402 SDK)`);
+console.log(`✅ Free tier: ${FREE_MESSAGES_PER_DAY} messages/day per agent`);
+console.log(`✅ Supported payment chains: ${Object.keys(CHAINS).join(', ')}`);
 
 app.route('/xchain', crossChainRoutes);
 console.log('✅ Cross-Chain Communication endpoints mounted');
