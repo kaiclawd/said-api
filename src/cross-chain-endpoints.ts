@@ -428,13 +428,6 @@ crossChain.get('/chains', (c) => {
 // WEBHOOKS — Push delivery for cross-chain messages
 // ═══════════════════════════════════════════════════════
 
-// In-memory webhook store (TODO: persist to DB)
-const webhooks = new Map<string, { url: string; secret?: string; createdAt: number }>();
-
-function getWebhookKey(chain: string, address: string): string {
-  return `${chain}:${address.toLowerCase()}`;
-}
-
 /**
  * POST /xchain/webhook
  * Register a webhook URL to receive messages for your agent
@@ -452,14 +445,19 @@ crossChain.post('/webhook', async (c) => {
     // Validate URL
     try { new URL(url); } catch { return c.json({ error: 'Invalid webhook URL' }, 400); }
 
-    const key = getWebhookKey(chain, address);
-    webhooks.set(key, { url, secret, createdAt: Date.now() });
+    const normalizedAddress = address.toLowerCase();
 
-    console.log(`[Webhook] Registered ${url} for ${chain}:${address}`);
+    const hook = await prisma.crossChainWebhook.upsert({
+      where: { chain_address: { chain, address: normalizedAddress } },
+      update: { url, secret: secret || null },
+      create: { chain, address: normalizedAddress, url, secret: secret || null },
+    });
+
+    console.log(`[Webhook] Registered ${url} for ${chain}:${normalizedAddress}`);
 
     return c.json({
       success: true,
-      webhook: { chain, address, url, hasSecret: !!secret },
+      webhook: { chain, address: normalizedAddress, url, hasSecret: !!secret },
       message: 'Webhook registered. You will receive POST requests when messages arrive.',
     });
   } catch (error: any) {
@@ -471,10 +469,13 @@ crossChain.post('/webhook', async (c) => {
  * GET /xchain/webhook/:chain/:address
  * Check webhook registration for an agent
  */
-crossChain.get('/webhook/:chain/:address', (c) => {
+crossChain.get('/webhook/:chain/:address', async (c) => {
   const { chain, address } = c.req.param();
-  const key = getWebhookKey(chain, address);
-  const hook = webhooks.get(key);
+  const normalizedAddress = address.toLowerCase();
+
+  const hook = await prisma.crossChainWebhook.findUnique({
+    where: { chain_address: { chain, address: normalizedAddress } },
+  });
 
   if (!hook) {
     return c.json({ registered: false, chain, address });
@@ -486,7 +487,7 @@ crossChain.get('/webhook/:chain/:address', (c) => {
     address,
     url: hook.url,
     hasSecret: !!hook.secret,
-    registeredAt: new Date(hook.createdAt).toISOString(),
+    registeredAt: hook.createdAt.toISOString(),
   });
 });
 
@@ -494,12 +495,22 @@ crossChain.get('/webhook/:chain/:address', (c) => {
  * DELETE /xchain/webhook/:chain/:address
  * Remove webhook registration
  */
-crossChain.delete('/webhook/:chain/:address', (c) => {
+crossChain.delete('/webhook/:chain/:address', async (c) => {
   const { chain, address } = c.req.param();
-  const key = getWebhookKey(chain, address);
-  const existed = webhooks.delete(key);
+  const normalizedAddress = address.toLowerCase();
 
-  return c.json({ success: true, removed: existed });
+  try {
+    await prisma.crossChainWebhook.delete({
+      where: { chain_address: { chain, address: normalizedAddress } },
+    });
+    return c.json({ success: true, removed: true });
+  } catch (e: any) {
+    // P2025 = record not found
+    if (e.code === 'P2025') {
+      return c.json({ success: true, removed: false });
+    }
+    throw e;
+  }
 });
 
 /**
@@ -511,14 +522,14 @@ export async function deliverToWebhook(
   address: string,
   payload: Record<string, unknown>,
 ): Promise<boolean> {
-  const key = getWebhookKey(chain, address);
-  const hook = webhooks.get(key);
+  const hook = await prisma.crossChainWebhook.findUnique({
+    where: { chain_address: { chain, address: address.toLowerCase() } },
+  });
   if (!hook) return false;
 
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (hook.secret) {
-      // Simple HMAC signature for webhook verification
       const crypto = await import('crypto');
       const sig = crypto.createHmac('sha256', hook.secret)
         .update(JSON.stringify(payload))

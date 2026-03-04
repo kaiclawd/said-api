@@ -249,6 +249,18 @@ model WebhookConfig {
   @@index([platform])
 }
 
+model CrossChainWebhook {
+  id        String   @id @default(cuid())
+  chain     String
+  address   String
+  url       String
+  secret    String?  // HMAC-SHA256 signing key
+  createdAt DateTime @default(now())
+
+  @@unique([chain, address])
+  @@index([chain, address])
+}
+
 model A2AMessage {
   id          String   @id @default(cuid())
   
