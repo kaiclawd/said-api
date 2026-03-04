@@ -4941,7 +4941,7 @@ try {
     try {
       return await x402(c, next);
     } catch (e) {
-      console.warn('[x402] Payment middleware error, allowing free message:', (e as any).message?.substring(0, 100));
+      console.error('[x402] Payment middleware error, allowing free message:', e);
       await next();
     }
   });
