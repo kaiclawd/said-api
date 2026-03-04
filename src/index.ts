@@ -30,7 +30,7 @@ import { Resend } from 'resend';
 
 import a2aRoutes from './a2a-endpoints.js';
 import crossChainRoutes from './cross-chain-endpoints.js';
-import { createX402Middleware, getFreeTierInfo, CHAINS, FREE_MESSAGES_PER_DAY, MESSAGE_PRICE } from './x402-config.js';
+import { createX402Middleware, getFreeTierInfo, CHAINS, FREE_MESSAGES_PER_DAY, MESSAGE_PRICE, bodyCache } from './x402-config.js';
 // Verify a Solana wallet signature
 function verifySignature(message: string, signature: string, walletAddress: string): boolean {
   try {
@@ -4938,6 +4938,21 @@ syncAgentsFromChain();
 // Mount A2A routes
 app.route('/a2a', a2aRoutes);
 console.log('✅ A2A Protocol endpoints mounted');
+
+// Pre-cache request body BEFORE x402 middleware runs.
+// Hono's c.req.json() can only be called once; the x402 middleware may consume it,
+// leaving the free-tier hook unable to read the body. This middleware clones the
+// request and stashes the parsed JSON in a WeakMap keyed by the raw Request object.
+app.use('/xchain/*', async (c, next) => {
+  try {
+    const cloned = c.req.raw.clone();
+    const body = await cloned.json();
+    bodyCache.set(c.req.raw, body);
+  } catch {
+    // Not JSON or empty body — that's fine, free tier just won't match
+  }
+  await next();
+});
 
 // x402 payment middleware for cross-chain messaging (Coinbase SDK + PayAI Facilitator)
 // Includes built-in free tier: 10 messages/day per agent

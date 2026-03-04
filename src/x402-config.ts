@@ -83,6 +83,13 @@ function getFreeTierInfo(address: string): { used: number; remaining: number; li
   return { used, remaining: Math.max(0, FREE_MESSAGES_PER_DAY - used), limit: FREE_MESSAGES_PER_DAY };
 }
 
+// ── Body Cache (shared with upstream middleware) ─────────────────────────────
+
+// Body cache: populated by upstream middleware BEFORE x402 runs.
+// Maps raw Request → parsed body, so the free-tier hook can read
+// the body without competing with Hono's single-read c.req.json().
+export const bodyCache = new WeakMap<Request, any>();
+
 // ── Custom x402 Middleware with Free Tier ────────────────────────────────────
 
 /**
@@ -157,7 +164,9 @@ export function createX402Middleware() {
     }
 
     try {
-      const body = await context.adapter.getBody?.() as any;
+      // Use pre-cached body from upstream middleware (avoids double c.req.json() issue)
+      const rawReq = (context.adapter as any)?.c?.req?.raw;
+      const body = (rawReq ? bodyCache.get(rawReq) : undefined) ?? await context.adapter.getBody?.() as any;
       const senderAddress = body?.from?.address;
 
       if (senderAddress && hasFreeTierRemaining(senderAddress)) {
