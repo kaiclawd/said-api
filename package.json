@@ -22,7 +22,6 @@
   "license": "MIT",
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1",
-    "@esbuild/darwin-x64": "^0.27.3",
     "@hono/node-server": "^1.14.1",
     "@metaplex-foundation/mpl-token-metadata": "^3.4.0",
     "@payai/facilitator": "^2.2.4",
@@ -34,7 +33,6 @@
     "@x402/svm": "^2.5.0",
     "bs58": "^6.0.0",
     "dotenv": "^16.5.0",
-    "esbuild": "^0.27.3",
     "ethers": "^6.16.0",
     "hono": "^4.7.4",
     "prisma": "^6.5.0",
