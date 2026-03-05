@@ -5275,3 +5275,104 @@ app.post('/api/passport/:wallet/send', async (c) => {
     return c.json({ error: err.message }, 500);
   }
 });
+
+// ============ SEED CORE CAPABILITIES ============
+// Register SAID's own services in the capabilities registry on startup
+async function seedCoreCapabilities() {
+  const coreServices = [
+    {
+      wallet: 'SAID_PROTOCOL',
+      capability: 'said.messaging.v1',
+      endpoint: 'https://api.saidprotocol.com/xchain/message',
+      description: 'Cross-chain agent-to-agent messaging across 10+ networks. Free tier: 10 msgs/day. Paid: $0.01 USDC per message via x402.',
+      pricing: { amount: '0.01', currency: 'USDC', chain: 'solana', freeTier: '10 messages/day' },
+      chain: 'cross-chain',
+    },
+    {
+      wallet: 'SAID_PROTOCOL',
+      capability: 'said.messaging.websocket.v1',
+      endpoint: 'wss://api.saidprotocol.com/ws',
+      description: 'Real-time bidirectional agent communication via WebSocket. Auth with wallet signature. Free tier + x402 payments.',
+      pricing: { amount: '0.01', currency: 'USDC', chain: 'solana', freeTier: '10 messages/day' },
+      chain: 'cross-chain',
+    },
+    {
+      wallet: 'SAID_PROTOCOL',
+      capability: 'said.identity.register.v1',
+      endpoint: 'https://api.saidprotocol.com/api/register/sponsored',
+      description: 'Register your agent on SAID Protocol. On-chain identity on Solana with optional verification.',
+      pricing: { amount: '0', currency: 'SOL', chain: 'solana', note: 'Free sponsored registration' },
+      chain: 'solana',
+    },
+    {
+      wallet: 'SAID_PROTOCOL',
+      capability: 'said.directory.v1',
+      endpoint: 'https://api.saidprotocol.com/api/agents',
+      description: 'Discover registered AI agents. Search by name, skills, platform. 1,200+ agents indexed.',
+      pricing: null,
+      chain: 'cross-chain',
+    },
+    {
+      wallet: 'SAID_PROTOCOL',
+      capability: 'said.webhooks.v1',
+      endpoint: 'https://api.saidprotocol.com/xchain/webhook',
+      description: 'Register webhooks to receive agent messages via HTTP POST. HMAC-SHA256 signed.',
+      pricing: null,
+      chain: 'cross-chain',
+    },
+  ];
+
+  for (const svc of coreServices) {
+    try {
+      await prisma.capability.upsert({
+        where: { wallet_capability: { wallet: svc.wallet, capability: svc.capability } },
+        create: svc,
+        update: {
+          endpoint: svc.endpoint,
+          description: svc.description,
+          pricing: svc.pricing,
+          active: true,
+        },
+      });
+    } catch (e: any) {
+      // Skip if agent relation fails (SAID_PROTOCOL isn't a real agent)
+      if (e.code === 'P2003') {
+        // Foreign key constraint — need to create a system agent first
+        try {
+          await prisma.agent.upsert({
+            where: { wallet: 'SAID_PROTOCOL' },
+            create: {
+              wallet: 'SAID_PROTOCOL',
+              pda: 'SAID_PROTOCOL',
+              owner: 'SAID_PROTOCOL',
+              metadataUri: 'https://api.saidprotocol.com',
+              name: 'SAID Protocol',
+              description: 'The Communication Layer for AI Agents',
+              registeredAt: new Date(),
+              isVerified: true,
+              verifiedAt: new Date(),
+              registrationSource: 'system',
+            },
+            update: {},
+          });
+          await prisma.capability.upsert({
+            where: { wallet_capability: { wallet: svc.wallet, capability: svc.capability } },
+            create: svc,
+            update: {
+              endpoint: svc.endpoint,
+              description: svc.description,
+              pricing: svc.pricing,
+              active: true,
+            },
+          });
+        } catch (e2) {
+          console.error(`[Seed] Failed to seed ${svc.capability}:`, e2);
+        }
+      }
+    }
+  }
+  console.log('[Seed] Core capabilities registered');
+}
+
+// Run seed on startup (after DB connection)
+seedCoreCapabilities().catch(console.error);
