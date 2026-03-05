@@ -77,7 +77,7 @@ function getPlatformKey(name: string): string | undefined {
 
 // SAID Program constants
 const SAID_PROGRAM_ID = new PublicKey('5dpw6KEQPn248pnkkaYyWfHwu2nfb3LUMbTucb6LaA8G');
-const AGENT_ACCOUNT_SIZE = 263;
+const AGENT_ACCOUNT_SIZE = 263; // Legacy size - actual accounts may be larger (295+) due to authority field
 
 // RPC connection
 const connection = new Connection(
@@ -4052,105 +4052,183 @@ app.post('/users/me/agents', async (c) => {
 
 // ============ SYNC (internal) ============
 
-async function syncAgentsFromChain() {
-  console.log('Syncing agents from chain...');
+/**
+ * Parse a single on-chain agent PDA account buffer.
+ * 
+ * Two layouts exist:
+ * 
+ * OLD (263 bytes): disc(8) + owner(32) + uri(borsh) + created_at(i64) + is_verified(1) + bump(1) + ...
+ * NEW (295 bytes): disc(8) + owner(32) + authority(32) + uri(borsh) + created_at(i64) + is_verified(1) + bump(1) + ...
+ * 
+ * Borsh string = 4-byte LE length + utf8 bytes
+ */
+function parseAgentPDA(data: Buffer): {
+  owner: string;
+  authority: string;
+  createdAt: number;
+  isVerified: boolean;
+  metadataUri: string;
+} | null {
+  if (data.length < 54) return null; // absolute minimum: 8+32+4+8+1+1
   
   try {
-    const accounts = await connection.getProgramAccounts(SAID_PROGRAM_ID, {
-      filters: [{ dataSize: AGENT_ACCOUNT_SIZE }]
-    });
+    const owner = new PublicKey(data.subarray(8, 40)).toString();
+    let authority = owner; // default: authority = owner
+    let uriOffset: number;
+    
+    if (data.length >= 295) {
+      // NEW layout: has authority field at 40-71
+      authority = new PublicKey(data.subarray(40, 72)).toString();
+      uriOffset = 72;
+    } else {
+      // OLD layout: uri starts right after owner
+      uriOffset = 40;
+    }
+    
+    const uriLength = data.readUInt32LE(uriOffset);
+    if (uriLength <= 0 || uriLength > 500 || uriOffset + 4 + uriLength > data.length) return null;
+    const metadataUri = data.subarray(uriOffset + 4, uriOffset + 4 + uriLength).toString('utf8');
+    
+    // After uri: created_at(8) + is_verified(1) + bump(1)
+    const tsOffset = uriOffset + 4 + uriLength;
+    if (tsOffset + 10 > data.length) return null;
+    
+    const createdAt = Number(data.readBigInt64LE(tsOffset));
+    const isVerified = data[tsOffset + 8] === 1;
+    
+    return { owner, authority, createdAt, isVerified, metadataUri };
+  } catch {
+    return null;
+  }
+}
+
+async function syncAgentsFromChain(): Promise<{ synced: number; updated: number; skipped: number; errors: number }> {
+  console.log('[Sync] Starting on-chain agent sync...');
+  const stats = { synced: 0, updated: 0, skipped: 0, errors: 0 };
+  
+  try {
+    // Fetch ALL program accounts (no dataSize filter — accounts may vary)
+    const accounts = await connection.getProgramAccounts(SAID_PROGRAM_ID);
+    console.log(`[Sync] Found ${accounts.length} program accounts`);
     
     for (const { pubkey, account } of accounts) {
       try {
-      const data = account.data;
-      
-      // Parse on-chain data
-      const owner = new PublicKey(data.subarray(8, 40)).toString();
-      const uriLength = data.readUInt32LE(40);
-      const metadataUri = data.subarray(44, 44 + uriLength).toString('utf8');
-      const offset = 44 + uriLength;
-      
-      // Parse timestamps with validation (chain stores unix seconds)
-      const rawRegisteredAt = Number(data.readBigInt64LE(offset));
-      const rawVerifiedAt = Number(data.readBigInt64LE(offset + 9));
-      const isVerified = data[offset + 8] === 1;
-      
-      // Validate timestamps are reasonable (between 2020 and 2100)
-      const minTs = 1577836800; // 2020-01-01
-      const maxTs = 4102444800; // 2100-01-01
-      const registeredAt = (rawRegisteredAt > minTs && rawRegisteredAt < maxTs) ? rawRegisteredAt : Math.floor(Date.now() / 1000);
-      const verifiedAt = (rawVerifiedAt > minTs && rawVerifiedAt < maxTs) ? rawVerifiedAt : 0;
-      
-      // Fetch metadata card
-      let card: any = {};
-      try {
-        let uri = metadataUri;
-        // Fix www prefix only for main site, not api subdomain
-        if (uri.includes('://saidprotocol.com') || uri.includes('://www.saidprotocol.com')) {
-          uri = uri.replace('://saidprotocol.com', '://www.saidprotocol.com');
+        const parsed = parseAgentPDA(account.data);
+        if (!parsed) {
+          stats.skipped++;
+          continue;
         }
-        // api.saidprotocol.com should remain unchanged
-        const res = await fetch(uri);
-        if (res.ok) {
-          const text = await res.text();
-          // Only parse as JSON if it looks like JSON (not HTML)
-          if (text.trim().startsWith('{')) {
-            card = JSON.parse(text);
+        
+        const { owner, authority, createdAt, isVerified, metadataUri } = parsed;
+        const pdaStr = pubkey.toString();
+        
+        // Validate timestamp (between 2024 and 2100)
+        const minTs = 1704067200; // 2024-01-01
+        const maxTs = 4102444800; // 2100-01-01
+        const validCreatedAt = (createdAt > minTs && createdAt < maxTs) ? createdAt : Math.floor(Date.now() / 1000);
+        
+        // Check if already in DB
+        const existing = await prisma.agent.findUnique({ where: { pda: pdaStr } });
+        
+        // Fetch metadata card (only for new agents or if name is missing)
+        let card: any = {};
+        if (!existing || !existing.name) {
+          try {
+            let uri = metadataUri;
+            if (uri.includes('://saidprotocol.com')) {
+              uri = uri.replace('://saidprotocol.com', '://www.saidprotocol.com');
+            }
+            const res = await fetch(uri, { signal: AbortSignal.timeout(5000) });
+            if (res.ok) {
+              const text = await res.text();
+              if (text.trim().startsWith('{')) {
+                card = JSON.parse(text);
+              }
+            }
+          } catch (e) {
+            // Silent — metadata fetch is best-effort
           }
         }
-      } catch (e) {
-        console.log(`Failed to fetch card for ${owner}: ${e}`);
-      }
-      
-      // Upsert agent
-      await prisma.agent.upsert({
-        where: { pda: pubkey.toString() },
-        create: {
-          wallet: owner,
-          pda: pubkey.toString(),
-          owner,
-          metadataUri,
-          registeredAt: new Date(registeredAt * 1000),
-          isVerified,
-          verifiedAt: verifiedAt > 0 ? new Date(verifiedAt * 1000) : null,
-          name: card.name,
-          description: card.description,
-          twitter: card.twitter,
-          image: card.image,
-          website: card.website,
-          mcpEndpoint: card.mcpEndpoint,
-          a2aEndpoint: card.a2aEndpoint,
-          x402Wallet: card.x402Wallet,
-          serviceTypes: card.serviceTypes || [],
-          skills: card.capabilities || card.skills || [],
-        },
-        update: {
-          metadataUri,
-          isVerified,
-          verifiedAt: verifiedAt > 0 ? new Date(verifiedAt * 1000) : null,
-          name: card.name,
-          description: card.description,
-          twitter: card.twitter,
-          image: card.image,
-          website: card.website,
-          mcpEndpoint: card.mcpEndpoint,
-          a2aEndpoint: card.a2aEndpoint,
-          x402Wallet: card.x402Wallet,
-          serviceTypes: card.serviceTypes || [],
-          skills: card.capabilities || card.skills || [],
-          lastSyncedAt: new Date(),
+        
+        if (!existing) {
+          // NEW agent — insert
+          await prisma.agent.create({
+            data: {
+              wallet: owner,
+              pda: pdaStr,
+              owner,
+              metadataUri,
+              registeredAt: new Date(validCreatedAt * 1000),
+              isVerified,
+              verifiedAt: isVerified ? new Date(validCreatedAt * 1000) : null,
+              name: card.name || undefined,
+              description: card.description || undefined,
+              twitter: card.twitter || undefined,
+              image: card.image || undefined,
+              website: card.website || undefined,
+              mcpEndpoint: card.mcpEndpoint || undefined,
+              a2aEndpoint: card.a2aEndpoint || undefined,
+              x402Wallet: card.x402Wallet || undefined,
+              serviceTypes: card.serviceTypes || [],
+              skills: card.capabilities || card.skills || [],
+              registrationSource: 'on-chain-sync',
+              sponsored: true,
+            }
+          });
+          stats.synced++;
+        } else {
+          // Existing — update if verification status changed or metadata changed
+          const needsUpdate = existing.isVerified !== isVerified || existing.metadataUri !== metadataUri;
+          if (needsUpdate) {
+            await prisma.agent.update({
+              where: { pda: pdaStr },
+              data: {
+                isVerified,
+                verifiedAt: isVerified && !existing.verifiedAt ? new Date(validCreatedAt * 1000) : existing.verifiedAt,
+                metadataUri,
+                lastSyncedAt: new Date(),
+                ...(card.name && { name: card.name }),
+                ...(card.description && { description: card.description }),
+                ...(card.twitter && { twitter: card.twitter }),
+                ...(card.image && { image: card.image }),
+                ...(card.website && { website: card.website }),
+              }
+            });
+            stats.updated++;
+          } else {
+            stats.skipped++;
+          }
         }
-      });
-      } catch (e) {
-        console.error(`Failed to sync agent ${pubkey.toString()}:`, e);
+      } catch (e: any) {
+        // Handle unique constraint violation (wallet already exists with different PDA)
+        if (e.code === 'P2002') {
+          stats.skipped++;
+        } else {
+          console.error(`[Sync] Failed to sync ${pubkey.toString()}:`, e.message);
+          stats.errors++;
+        }
       }
     }
     
-    console.log(`Synced ${accounts.length} agents`);
+    console.log(`[Sync] Complete: ${stats.synced} new, ${stats.updated} updated, ${stats.skipped} skipped, ${stats.errors} errors`);
   } catch (e) {
-    console.error('Sync error:', e);
+    console.error('[Sync] Fatal error:', e);
   }
+  
+  return stats;
 }
+
+// ============ ADMIN: ON-CHAIN SYNC ============
+app.post('/admin/sync-onchain', async (c) => {
+  if (!checkAdminAuth(c)) return c.json({ error: 'Unauthorized' }, 401);
+  
+  const stats = await syncAgentsFromChain();
+  return c.json({
+    success: true,
+    message: `Sync complete: ${stats.synced} new, ${stats.updated} updated, ${stats.skipped} skipped, ${stats.errors} errors`,
+    ...stats,
+  });
+});
 
 // Admin endpoints (REQUIRES ADMIN_SECRET in environment)
 app.get('/admin/list-users', async (c) => {
