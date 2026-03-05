@@ -46,7 +46,7 @@ const DEXTER_FACILITATOR_URL = 'https://x402.dexter.cash';
 
 // ── Free Tier ───────────────────────────────────────────────────────────────
 
-const FREE_MESSAGES_PER_DAY = 10;
+const FREE_MESSAGES_PER_DAY = 50;
 
 // In-memory rate limit counter: { "address:date" → count }
 const freeTierUsage = new Map<string, number>();
