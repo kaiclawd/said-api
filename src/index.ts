@@ -94,7 +94,7 @@ app.use('/*', cors({
     'https://devoted-cooperation-production-8f30.up.railway.app',
     'https://staging-v2-production.up.railway.app'
   ],
-  allowMethods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
+  allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization'],
 }));
 
@@ -5015,6 +5015,203 @@ app.get('/api/agent/:wallet/wallets', async (c) => {
     console.error('[List Wallets Error]', error);
     return c.json({ error: 'Failed to list wallets', details: error.message }, 500);
   }
+});
+
+// ============ CAPABILITIES REGISTRY ============
+
+// Generate the message that must be signed for capability operations
+function getCapabilityMessage(wallet: string, capability: string, timestamp: number): string {
+  return `SAID:capability:${wallet}:${capability}:${timestamp}`;
+}
+
+/**
+ * POST /api/capabilities/register
+ * Register a capability (service) that an agent offers
+ */
+app.post('/api/capabilities/register', async (c) => {
+  const body = await c.req.json();
+  const { wallet, capability, endpoint, description, pricing, signature, timestamp } = body;
+
+  // Validate required fields
+  if (!wallet || !capability || !endpoint || !signature || !timestamp) {
+    return c.json({ error: 'Missing required fields: wallet, capability, endpoint, signature, timestamp' }, 400);
+  }
+
+  // Validate capability format (dotted namespace)
+  if (!/^[a-z0-9]+(\.[a-z0-9]+)+$/.test(capability)) {
+    return c.json({ error: 'Capability must be dotted namespace (e.g., solana.token.risk.v1)' }, 400);
+  }
+
+  // Timestamp must be within 5 minutes
+  if (Math.abs(Date.now() - timestamp) > 5 * 60 * 1000) {
+    return c.json({ error: 'Timestamp too old. Sign a fresh message.' }, 400);
+  }
+
+  // Verify signature
+  const message = getCapabilityMessage(wallet, capability, timestamp);
+  const isValid = verifySignature(message, signature, wallet);
+  if (!isValid) {
+    return c.json({ error: 'Invalid signature' }, 401);
+  }
+
+  // Check agent exists
+  const agent = await prisma.agent.findUnique({ where: { wallet } });
+  if (!agent) {
+    return c.json({ error: 'Agent not found. Must be registered on SAID first.' }, 404);
+  }
+
+  // Determine chain from capability namespace or pricing
+  const chain = pricing?.chain || capability.split('.')[0] || 'solana';
+
+  try {
+    const cap = await prisma.capability.upsert({
+      where: { wallet_capability: { wallet, capability } },
+      create: {
+        wallet,
+        capability,
+        endpoint,
+        description: description || null,
+        pricing: pricing || null,
+        chain,
+      },
+      update: {
+        endpoint,
+        description: description || null,
+        pricing: pricing || null,
+        chain,
+        active: true,
+      },
+    });
+
+    emitAgentEvent('capability:registered', { wallet, capability, endpoint });
+
+    return c.json({
+      success: true,
+      message: `Capability '${capability}' registered`,
+      capability: cap,
+    });
+  } catch (error: any) {
+    console.error('Capability registration error:', error);
+    return c.json({ error: 'Failed to register capability: ' + error.message }, 500);
+  }
+});
+
+/**
+ * GET /api/capabilities
+ * List all active capabilities (paginated, filterable)
+ */
+app.get('/api/capabilities', async (c) => {
+  const { chain, category, limit, offset } = c.req.query();
+
+  const where: any = { active: true };
+  if (chain) where.chain = chain;
+  if (category) where.capability = { contains: `.${category}.` };
+
+  const capabilities = await prisma.capability.findMany({
+    where,
+    orderBy: { createdAt: 'desc' },
+    take: Math.min(parseInt(limit || '20'), 100),
+    skip: parseInt(offset || '0'),
+    include: {
+      agent: {
+        select: { wallet: true, name: true, isVerified: true, reputationScore: true },
+      },
+    },
+  });
+
+  const total = await prisma.capability.count({ where });
+
+  return c.json({ capabilities, total, limit: parseInt(limit || '20'), offset: parseInt(offset || '0') });
+});
+
+/**
+ * GET /api/capabilities/:capability
+ * Get all agents offering a specific capability
+ */
+app.get('/api/capabilities/:capability', async (c) => {
+  const capability = c.req.param('capability');
+
+  const capabilities = await prisma.capability.findMany({
+    where: { capability, active: true },
+    include: {
+      agent: {
+        select: { wallet: true, name: true, isVerified: true, reputationScore: true, description: true },
+      },
+    },
+  });
+
+  if (capabilities.length === 0) {
+    return c.json({ error: 'No agents offer this capability' }, 404);
+  }
+
+  return c.json({
+    capability,
+    providers: capabilities.map((cap) => ({
+      wallet: cap.wallet,
+      endpoint: cap.endpoint,
+      description: cap.description,
+      pricing: cap.pricing,
+      chain: cap.chain,
+      agent: cap.agent,
+      registeredAt: cap.createdAt,
+    })),
+    count: capabilities.length,
+  });
+});
+
+/**
+ * DELETE /api/capabilities/:capability
+ * Deregister a capability (requires wallet signature)
+ */
+app.delete('/api/capabilities/:capability', async (c) => {
+  const capability = c.req.param('capability');
+  const body = await c.req.json();
+  const { wallet, signature, timestamp } = body;
+
+  if (!wallet || !signature || !timestamp) {
+    return c.json({ error: 'Missing required fields: wallet, signature, timestamp' }, 400);
+  }
+
+  // Timestamp must be within 5 minutes
+  if (Math.abs(Date.now() - timestamp) > 5 * 60 * 1000) {
+    return c.json({ error: 'Timestamp too old. Sign a fresh message.' }, 400);
+  }
+
+  // Verify signature
+  const message = getCapabilityMessage(wallet, capability, timestamp);
+  const isValid = verifySignature(message, signature, wallet);
+  if (!isValid) {
+    return c.json({ error: 'Invalid signature' }, 401);
+  }
+
+  try {
+    await prisma.capability.update({
+      where: { wallet_capability: { wallet, capability } },
+      data: { active: false },
+    });
+
+    return c.json({ success: true, message: `Capability '${capability}' deregistered` });
+  } catch (error: any) {
+    return c.json({ error: 'Capability not found' }, 404);
+  }
+});
+
+/**
+ * GET /api/capabilities/:capability/message
+ * Get the message to sign for capability registration/deregistration
+ */
+app.get('/api/capabilities/:capability/message', (c) => {
+  const capability = c.req.param('capability');
+  const { wallet } = c.req.query();
+
+  if (!wallet) {
+    return c.json({ error: 'Query param required: wallet' }, 400);
+  }
+
+  const timestamp = Date.now();
+  const message = getCapabilityMessage(wallet, capability, timestamp);
+
+  return c.json({ message, timestamp });
 });
 
 // ============ START ============

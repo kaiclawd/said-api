@@ -61,6 +61,7 @@ model Agent {
   attestationsReceived Attestation[] @relation("AttestationsReceived")
   attestationsGiven    Attestation[] @relation("AttestationsGiven")
   createdByUsers   UserAgent[]
+  capabilities     Capability[]
 
   @@index([name])
   @@index([reputationScore])
@@ -247,6 +248,25 @@ model WebhookConfig {
   updatedAt       DateTime  @updatedAt
   
   @@index([platform])
+}
+
+model Capability {
+  id          String   @id @default(cuid())
+  wallet      String
+  capability  String
+  endpoint    String
+  description String?
+  pricing     Json?
+  chain       String   @default("solana")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  active      Boolean  @default(true)
+
+  agent       Agent    @relation(fields: [wallet], references: [wallet])
+
+  @@unique([wallet, capability])
+  @@index([capability])
+  @@index([chain])
 }
 
 model CrossChainWebhook {
