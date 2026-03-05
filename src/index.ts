@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { serve } from '@hono/node-server';
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, Prisma } from '@prisma/client';
 import { Connection, PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL, Keypair } from '@solana/web3.js';
 import {
   TOKEN_2022_PROGRAM_ID,
@@ -5309,7 +5309,7 @@ async function seedCoreCapabilities() {
       capability: 'said.directory.v1',
       endpoint: 'https://api.saidprotocol.com/api/agents',
       description: 'Discover registered AI agents. Search by name, skills, platform. 1,200+ agents indexed.',
-      pricing: null,
+      pricing: Prisma.JsonNull,
       chain: 'cross-chain',
     },
     {
@@ -5317,7 +5317,7 @@ async function seedCoreCapabilities() {
       capability: 'said.webhooks.v1',
       endpoint: 'https://api.saidprotocol.com/xchain/webhook',
       description: 'Register webhooks to receive agent messages via HTTP POST. HMAC-SHA256 signed.',
-      pricing: null,
+      pricing: Prisma.JsonNull,
       chain: 'cross-chain',
     },
   ];
