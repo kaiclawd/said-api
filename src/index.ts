@@ -4220,7 +4220,7 @@ async function syncAgentsFromChain(): Promise<{ synced: number; updated: number;
 
 // ============ ADMIN: ON-CHAIN SYNC ============
 app.post('/admin/sync-onchain', async (c) => {
-  if (!checkAdminAuth(c)) return c.json({ error: 'Unauthorized' }, 401);
+  if (!checkAdminAuth(c)) return c.notFound();
   
   const stats = await syncAgentsFromChain();
   return c.json({
@@ -4232,7 +4232,7 @@ app.post('/admin/sync-onchain', async (c) => {
 
 // Admin endpoints (REQUIRES ADMIN_SECRET in environment)
 app.get('/admin/list-users', async (c) => {
-  if (!checkAdminAuth(c)) return c.json({ error: 'Unauthorized' }, 401);
+  if (!checkAdminAuth(c)) return c.notFound();
   
   const users = await prisma.user.findMany({
     where: { privyId: { not: null } },
@@ -4242,7 +4242,7 @@ app.get('/admin/list-users', async (c) => {
 });
 
 app.post('/admin/link-agent', async (c) => {
-  if (!checkAdminAuth(c)) return c.json({ error: 'Unauthorized' }, 401);
+  if (!checkAdminAuth(c)) return c.notFound();
   const { agentWallet, userId } = await c.req.json();
   
   const result = await prisma.userAgent.upsert({
@@ -4254,7 +4254,7 @@ app.post('/admin/link-agent', async (c) => {
 });
 
 app.delete('/admin/agent/:id', async (c) => {
-  if (!checkAdminAuth(c)) return c.json({ error: 'Unauthorized' }, 401);
+  if (!checkAdminAuth(c)) return c.notFound();
   const { id } = c.req.param();
   await prisma.agent.delete({ where: { id } });
   return c.json({ ok: true, deleted: id });
@@ -4262,7 +4262,7 @@ app.delete('/admin/agent/:id', async (c) => {
 
 // Admin: bulk-tag agents by registration source
 app.post('/admin/tag-source', async (c) => {
-  if (!checkAdminAuth(c)) return c.json({ error: 'Unauthorized' }, 401);
+  if (!checkAdminAuth(c)) return c.notFound();
   const { wallets, registrationSource } = await c.req.json();
   if (!wallets?.length || !registrationSource) return c.json({ error: 'Required: wallets[], registrationSource' }, 400);
   
@@ -4292,14 +4292,16 @@ app.post('/api/grants/apply', async (c) => {
 });
 
 app.get('/admin/grants', async (c) => {
-  if (!checkAdminAuth(c)) return c.json({ error: 'Unauthorized' }, 401);
+  if (!checkAdminAuth(c)) return c.notFound();
   const applications = await prisma.grantApplication.findMany({ orderBy: { createdAt: 'desc' } });
   return c.json({ applications });
 });
 
 // Admin authentication helper - REQUIRES ADMIN_SECRET environment variable
+// Returns 404 (not 401) to hide endpoint existence from attackers
+// Only accepts header auth (no query params — secrets in URLs leak to logs)
 const checkAdminAuth = (c: any): boolean => {
-  const secret = c.req.query('secret') || c.req.header('x-admin-secret');
+  const secret = c.req.header('x-admin-secret');
   const adminSecret = process.env.ADMIN_SECRET;
   
   if (!adminSecret) {
@@ -4311,21 +4313,21 @@ const checkAdminAuth = (c: any): boolean => {
 };
 
 app.post('/admin/grants/:id/approve', async (c) => {
-  if (!checkAdminAuth(c)) return c.json({ error: 'Unauthorized' }, 401);
+  if (!checkAdminAuth(c)) return c.notFound();
   const { id } = c.req.param();
   const application = await prisma.grantApplication.update({ where: { id }, data: { status: 'approved' } });
   return c.json({ ok: true, application });
 });
 
 app.post('/admin/grants/:id/reject', async (c) => {
-  if (!checkAdminAuth(c)) return c.json({ error: 'Unauthorized' }, 401);
+  if (!checkAdminAuth(c)) return c.notFound();
   const { id } = c.req.param();
   const application = await prisma.grantApplication.update({ where: { id }, data: { status: 'rejected' } });
   return c.json({ ok: true, application });
 });
 
 app.post('/admin/feedback', async (c) => {
-  if (!checkAdminAuth(c)) return c.json({ error: 'Unauthorized' }, 401);
+  if (!checkAdminAuth(c)) return c.notFound();
   const { fromWallet, toWallet, score, comment } = await c.req.json();
   const targetAgent = await prisma.agent.findUnique({ where: { wallet: toWallet } });
   if (!targetAgent) return c.json({ error: 'Agent not found' }, 404);
@@ -4346,7 +4348,7 @@ app.post('/admin/feedback', async (c) => {
 });
 
 app.post('/admin/delete-feedback', async (c) => {
-  if (!checkAdminAuth(c)) return c.json({ error: 'Unauthorized' }, 401);
+  if (!checkAdminAuth(c)) return c.notFound();
   const { fromWallet, toWallet } = await c.req.json();
   await prisma.feedback.delete({ where: { fromWallet_toWallet: { fromWallet, toWallet } } });
   const allFeedback = await prisma.feedback.findMany({ where: { toWallet }, select: { score: true, weight: true } });
