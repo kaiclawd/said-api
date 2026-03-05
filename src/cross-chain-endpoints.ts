@@ -253,36 +253,11 @@ crossChain.post('/message', async (c) => {
       timestamp: new Date().toISOString(),
     };
 
-    // Try delivery: A2A endpoint first, then webhook
+    // Try delivery: WS first (fastest), then A2A endpoint, then webhook
     let delivered = false;
+    let wsDelivered = false;
     
-    // 1. A2A endpoint delivery
-    if (recipient.endpoint) {
-      try {
-        const deliveryRes = await fetch(recipient.endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(deliveryPayload),
-          signal: AbortSignal.timeout(10000),
-        });
-        delivered = deliveryRes.ok;
-      } catch (e) {
-        console.warn(`[XChain] A2A delivery to ${recipient.endpoint} failed:`, e);
-      }
-    }
-
-    // 2. Webhook delivery (even if A2A succeeded — both can receive)
-    const webhookDelivered = await deliverToWebhook(to.chain, to.address, deliveryPayload);
-
-    // Update status
-    if (delivered || webhookDelivered) {
-      await prisma.a2AMessage.update({
-        where: { taskId: messageId },
-        data: { status: 'routed' },
-      });
-    }
-
-    // Push to WebSocket if recipient is connected
+    // 1. Push to WebSocket if recipient is connected
     const wsKey = getWsKey(to.chain, to.address);
     const recipientWs = wsClients.get(wsKey);
     if (recipientWs && (recipientWs as any).readyState === 1) {
@@ -298,7 +273,37 @@ crossChain.post('/message', async (c) => {
           message,
           createdAt: new Date().toISOString(),
         }));
-      } catch {}
+        wsDelivered = true;
+        console.log(`[XChain] WS delivered to ${to.chain}:${to.address}`);
+      } catch (e) {
+        console.warn(`[XChain] WS delivery failed:`, e);
+      }
+    }
+    
+    // 2. A2A endpoint delivery
+    if (recipient.endpoint) {
+      try {
+        const deliveryRes = await fetch(recipient.endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(deliveryPayload),
+          signal: AbortSignal.timeout(10000),
+        });
+        delivered = deliveryRes.ok;
+      } catch (e) {
+        console.warn(`[XChain] A2A delivery to ${recipient.endpoint} failed:`, e);
+      }
+    }
+
+    // 3. Webhook delivery (even if A2A succeeded — both can receive)
+    const webhookDelivered = await deliverToWebhook(to.chain, to.address, deliveryPayload);
+
+    // Update status
+    if (delivered || webhookDelivered || wsDelivered) {
+      await prisma.a2AMessage.update({
+        where: { taskId: messageId },
+        data: { status: 'routed' },
+      });
     }
 
     // Check if this was a paid request (payment header present = x402 settled)
@@ -308,9 +313,10 @@ crossChain.post('/message', async (c) => {
     return c.json({
       success: true,
       messageId,
-      status: delivered || webhookDelivered ? 'delivered' : 'stored',
+      status: delivered || webhookDelivered || wsDelivered ? 'delivered' : 'stored',
       paid: isPaid,
       deliveredVia: [
+        ...(wsDelivered ? ['ws'] : []),
         ...(delivered ? ['a2a'] : []),
         ...(webhookDelivered ? ['webhook'] : []),
       ],
