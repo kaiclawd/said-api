@@ -5279,7 +5279,7 @@ app.post('/api/passport/:wallet/send', async (c) => {
 // ============ SEED CORE CAPABILITIES ============
 // Register SAID's own services in the capabilities registry on startup
 async function seedCoreCapabilities() {
-  const coreServices = [
+  const coreServices: Array<{ wallet: string; capability: string; endpoint: string; description: string; pricing: any; chain: string }> = [
     {
       wallet: 'SAID_PROTOCOL',
       capability: 'said.messaging.v1',
