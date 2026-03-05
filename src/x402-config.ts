@@ -189,4 +189,4 @@ export function createX402Middleware() {
 
 // ── Exports ─────────────────────────────────────────────────────────────────
 
-export { getFreeTierInfo, CHAINS, FREE_MESSAGES_PER_DAY };
+export { getFreeTierInfo, hasFreeTierRemaining, consumeFreeTier, CHAINS, FREE_MESSAGES_PER_DAY };

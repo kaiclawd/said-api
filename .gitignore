@@ -6,3 +6,9 @@ dist/
 test-keypair.json
 test-x402*.ts
 test-keypair-v2.json
+said-onchain-register.ts
+said-register-api.ts
+said-register.ts
+test-keypair-v3.json
+test-paid-v3.ts
+test-paid.ts

@@ -282,6 +282,25 @@ crossChain.post('/message', async (c) => {
       });
     }
 
+    // Push to WebSocket if recipient is connected
+    const wsKey = getWsKey(to.chain, to.address);
+    const recipientWs = wsClients.get(wsKey);
+    if (recipientWs && (recipientWs as any).readyState === 1) {
+      try {
+        recipientWs.send(JSON.stringify({
+          type: 'message',
+          messageId,
+          from: {
+            address: from.address,
+            chain: from.chain,
+            name: sender.name,
+          },
+          message,
+          createdAt: new Date().toISOString(),
+        }));
+      } catch {}
+    }
+
     // Check if this was a paid request (payment header present = x402 settled)
     const paymentHeader = c.req.header('payment-signature') || c.req.header('x-payment');
     const isPaid = !!paymentHeader;
@@ -557,6 +576,7 @@ export async function deliverToWebhook(
 // ═══════════════════════════════════════════════════════
 
 import { getFreeTierInfo, CHAINS as PAYMENT_CHAINS, FREE_MESSAGES_PER_DAY, MESSAGE_PRICE } from './x402-config.js';
+import { wsClients, getWsKey } from './ws-clients.js';
 
 /**
  * GET /xchain/free-tier/:address

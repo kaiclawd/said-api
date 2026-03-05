@@ -30,6 +30,7 @@ import { Resend } from 'resend';
 
 import a2aRoutes from './a2a-endpoints.js';
 import crossChainRoutes from './cross-chain-endpoints.js';
+import { setupWebSocket } from './ws-handler.js';
 import { createX402Middleware, getFreeTierInfo, CHAINS, FREE_MESSAGES_PER_DAY, MESSAGE_PRICE, bodyCache } from './x402-config.js';
 // Verify a Solana wallet signature
 function verifySignature(message: string, signature: string, walletAddress: string): boolean {
@@ -4965,9 +4966,10 @@ app.route('/xchain', crossChainRoutes);
 console.log('✅ Cross-Chain Communication endpoints mounted');
 setInterval(syncAgentsFromChain, 5 * 60 * 1000);
 
-serve({ fetch: app.fetch, port }, (info) => {
+const server = serve({ fetch: app.fetch, port }, (info) => {
   console.log(`SAID API running on http://localhost:${info.port}`);
 });
+setupWebSocket(server as any);
 // Rebuild trigger Tue Feb  3 17:46:45 UTC 2026
 
 /**

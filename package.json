@@ -38,10 +38,12 @@
     "hono": "^4.7.4",
     "prisma": "^6.5.0",
     "resend": "^6.9.1",
-    "tweetnacl": "^1.0.3"
+    "tweetnacl": "^1.0.3",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.19.4",
     "typescript": "^5.8.2"
   },
