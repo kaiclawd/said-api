@@ -4171,15 +4171,21 @@ async function syncAgentsFromChain(): Promise<{ synced: number; updated: number;
               x402Wallet: card.x402Wallet || undefined,
               serviceTypes: card.serviceTypes || [],
               skills: card.capabilities || card.skills || [],
-              registrationSource: 'on-chain-sync',
+              registrationSource: card.platform === 'spawnr.io' ? 'spawnr' 
+                : card.platform === 'clawpump' ? 'clawpump' 
+                : 'on-chain-sync',
               sponsored: true,
             }
           });
           stats.synced++;
         } else {
           // Existing — update if verification status changed or metadata changed
-          const needsUpdate = existing.isVerified !== isVerified || existing.metadataUri !== metadataUri;
+          const needsSourceFix = existing.registrationSource === 'on-chain-sync' && card.platform;
+          const needsUpdate = existing.isVerified !== isVerified || existing.metadataUri !== metadataUri || needsSourceFix;
           if (needsUpdate) {
+            const source = card.platform === 'spawnr.io' ? 'spawnr' 
+              : card.platform === 'clawpump' ? 'clawpump' 
+              : existing.registrationSource;
             await prisma.agent.update({
               where: { pda: pdaStr },
               data: {
@@ -4187,6 +4193,7 @@ async function syncAgentsFromChain(): Promise<{ synced: number; updated: number;
                 verifiedAt: isVerified && !existing.verifiedAt ? new Date(validCreatedAt * 1000) : existing.verifiedAt,
                 metadataUri,
                 lastSyncedAt: new Date(),
+                registrationSource: source,
                 ...(card.name && { name: card.name }),
                 ...(card.description && { description: card.description }),
                 ...(card.twitter && { twitter: card.twitter }),
