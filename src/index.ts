@@ -149,6 +149,116 @@ app.get('/api/events', (c) => {
 app.get('/', (c) => c.json({ status: 'ok', service: 'said-api', version: '1.0.0' }));
 app.get('/health', (c) => c.json({ status: 'healthy' }));
 
+// ============ AVATAR GENERATOR ============
+
+/**
+ * Simple hash function (FNV-1a variant)
+ * Deterministically converts a wallet address into a hash
+ */
+function hashWallet(wallet: string): number[] {
+  const bytes: number[] = [];
+  let hash = 2166136261; // FNV offset basis
+  
+  for (let i = 0; i < wallet.length; i++) {
+    hash ^= wallet.charCodeAt(i);
+    hash = Math.imul(hash, 16777619); // FNV prime
+    bytes.push((hash >>> 0) & 0xFF);
+  }
+  
+  return bytes;
+}
+
+/**
+ * Generate deterministic pixel art avatar SVG
+ * 5x5 symmetric grid, SAID brand colors
+ */
+function generateAvatarSVG(wallet: string): string {
+  const hash = hashWallet(wallet);
+  
+  // SAID brand color palette
+  const colors = [
+    '#F59E0B', // electric amber — primary
+    '#D97706', // darker amber
+    '#FBBF24', // lighter amber
+    '#92400E', // deep amber
+    '#78716C', // warm gray
+    '#A8A29E', // light warm gray
+    '#FCD34D', // gold
+    '#B45309', // burnt amber
+  ];
+  
+  const bgColor = '#0B0F19'; // SAID midnight
+  
+  // Pick 1-2 colors from palette based on hash
+  const color1 = colors[hash[0] % colors.length];
+  const color2 = colors[hash[1] % colors.length];
+  const useSecondColor = hash[2] % 3 === 0; // ~33% chance of second color
+  
+  // Generate 5x5 grid (only need 3x5 cells, mirror for symmetry)
+  const grid: boolean[][] = [];
+  const cellSize = 20;
+  const gridSize = 5;
+  
+  for (let y = 0; y < gridSize; y++) {
+    grid[y] = [];
+    for (let x = 0; x < Math.ceil(gridSize / 2); x++) {
+      // Use hash bytes to determine if cell is filled (~50-60% density)
+      const byteIndex = (y * 3 + x) % hash.length;
+      const bit = (hash[byteIndex] >> (x % 8)) & 1;
+      const threshold = hash[(byteIndex + 7) % hash.length] % 256;
+      grid[y][x] = threshold < 140; // ~55% fill rate
+    }
+  }
+  
+  // Build SVG
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">`;
+  svg += `<rect width="100" height="100" fill="${bgColor}"/>`;
+  
+  // Render grid with symmetry
+  for (let y = 0; y < gridSize; y++) {
+    for (let x = 0; x < gridSize; x++) {
+      // Mirror columns 0-1 to columns 3-4
+      const sourceX = x < Math.ceil(gridSize / 2) ? x : gridSize - 1 - x;
+      
+      if (grid[y][sourceX]) {
+        // Pick color based on position
+        const useColor2 = useSecondColor && ((x + y) % 3 === 0);
+        const color = useColor2 ? color2 : color1;
+        
+        svg += `<rect x="${x * cellSize}" y="${y * cellSize}" width="${cellSize}" height="${cellSize}" fill="${color}"/>`;
+      }
+    }
+  }
+  
+  svg += `</svg>`;
+  return svg;
+}
+
+/**
+ * GET /api/avatar/:wallet.svg
+ * Returns deterministic pixel art avatar for a wallet address
+ */
+app.get('/api/avatar/:wallet.svg', (c) => {
+  const wallet = c.req.param('wallet');
+  
+  // Validate wallet format (basic check)
+  if (!wallet || wallet.length < 32) {
+    return c.text('Invalid wallet address', 400);
+  }
+  
+  try {
+    const svg = generateAvatarSVG(wallet);
+    
+    return c.body(svg, 200, {
+      'Content-Type': 'image/svg+xml',
+      'Cache-Control': 'public, max-age=31536000, immutable',
+    });
+  } catch (error) {
+    console.error('Avatar generation error:', error);
+    return c.text('Failed to generate avatar', 500);
+  }
+});
+
 // ============ MESSAGES (Live Ticker) ============
 
 // Get recent A2A messages for ticker
