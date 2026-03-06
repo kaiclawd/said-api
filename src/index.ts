@@ -149,6 +149,39 @@ app.get('/api/events', (c) => {
 app.get('/', (c) => c.json({ status: 'ok', service: 'said-api', version: '1.0.0' }));
 app.get('/health', (c) => c.json({ status: 'healthy' }));
 
+// ============ MESSAGES (Live Ticker) ============
+
+// Get recent A2A messages for ticker
+app.get('/api/messages/recent', async (c) => {
+  try {
+    const messages = await prisma.a2AMessage.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+      select: {
+        fromWallet: true,
+        toWallet: true,
+        createdAt: true,
+        status: true,
+      },
+    });
+
+    // Format messages for ticker display
+    const formatted = messages.map((msg) => ({
+      from: `${msg.fromWallet.slice(0, 4)}…${msg.fromWallet.slice(-4)}`,
+      to: `${msg.toWallet.slice(0, 4)}…${msg.toWallet.slice(-4)}`,
+      fromChain: 'solana',
+      toChain: 'solana',
+      timestamp: msg.createdAt.toISOString(),
+      paid: msg.status !== 'created', // assume paid if not just created
+    }));
+
+    return c.json(formatted);
+  } catch (err) {
+    console.error('Failed to fetch recent messages:', err);
+    return c.json({ error: 'Failed to fetch messages' }, 500);
+  }
+});
+
 // ============ AGENTS ============
 
 // List agents with search/filter
