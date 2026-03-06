@@ -238,8 +238,8 @@ function generateAvatarSVG(wallet: string): string {
  * GET /api/avatar/:wallet.svg
  * Returns deterministic pixel art avatar for a wallet address
  */
-app.get('/api/avatar/:wallet.svg', (c) => {
-  const wallet = c.req.param('wallet');
+app.get('/api/avatar/:file', (c) => {
+  const wallet = (c.req.param('file') || '').replace(/\.svg$/, '');
   
   // Validate wallet format (basic check)
   if (!wallet || wallet.length < 32) {
