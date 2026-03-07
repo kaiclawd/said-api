@@ -63,15 +63,15 @@ export const ERC8004_REPUTATION_REGISTRY = '0x8004BAa17C55a88189AE136b182e5fdA19
 
 // EVM chain RPC endpoints (public, free tier)
 export const EVM_RPC: Record<string, string> = {
-  ethereum: 'https://eth.llamarpc.com',
-  base: 'https://mainnet.base.org',
-  arbitrum: 'https://arb1.arbitrum.io/rpc',
-  avalanche: 'https://api.avax.network/ext/bc/C/rpc',
-  optimism: 'https://mainnet.optimism.io',
-  polygon: 'https://polygon-rpc.com',
-  celo: 'https://forno.celo.org',
-  gnosis: 'https://rpc.gnosischain.com',
-  bnb: 'https://bsc-dataseed1.binance.org',
+  ethereum: process.env.ETH_RPC_URL || 'https://eth.llamarpc.com',
+  base: process.env.BASE_RPC_URL || 'https://mainnet.base.org',
+  arbitrum: process.env.ARBITRUM_RPC_URL || 'https://arb1.arbitrum.io/rpc',
+  avalanche: process.env.AVALANCHE_RPC_URL || 'https://api.avax.network/ext/bc/C/rpc',
+  optimism: process.env.OPTIMISM_RPC_URL || 'https://mainnet.optimism.io',
+  polygon: process.env.POLYGON_RPC_URL || 'https://polygon-rpc.com',
+  celo: process.env.CELO_RPC_URL || 'https://forno.celo.org',
+  gnosis: process.env.GNOSIS_RPC_URL || 'https://rpc.gnosischain.com',
+  bnb: process.env.BNB_RPC_URL || 'https://bsc-dataseed1.binance.org',
 };
 
 // Minimal ERC-8004 Identity Registry ABI
