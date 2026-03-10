@@ -2268,7 +2268,7 @@ app.post('/api/platforms/said-hosting/confirm', async (c) => {
   }
   
   try {
-    // Deserialize and broadcast
+    // Deserialize transaction
     const txBuffer = Buffer.from(signedTransaction, 'base64');
     const tx = Transaction.from(txBuffer);
     
@@ -2280,11 +2280,27 @@ app.post('/api/platforms/said-hosting/confirm', async (c) => {
     }
     
     // Broadcast
-    const rawTx = tx.serialize();
-    const txHash = await connection.sendRawTransaction(rawTx, {
-      skipPreflight: false,
-      preflightCommitment: 'confirmed',
-    });
+    let txHash: string;
+    try {
+      const rawTx = tx.serialize();
+      txHash = await connection.sendRawTransaction(rawTx, {
+        skipPreflight: false,
+        preflightCommitment: 'confirmed',
+      });
+    } catch (broadcastError: any) {
+      // Check if blockhash expired - return special error for bootstrap to retry
+      if (broadcastError.message && (
+        broadcastError.message.includes('block height exceeded') ||
+        broadcastError.message.includes('Blockhash not found')
+      )) {
+        return c.json({
+          error: 'Transaction expired',
+          code: 'BLOCKHASH_EXPIRED',
+          message: 'Please retry registration from the beginning',
+        }, 400);
+      }
+      throw broadcastError;
+    }
     
     // Confirm
     const confirmation = await connection.confirmTransaction({
