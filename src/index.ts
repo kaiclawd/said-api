@@ -27,6 +27,7 @@ import nacl from 'tweetnacl';
 import bs58 from 'bs58';
 import fs from 'fs/promises';
 import { Resend } from 'resend';
+import { PrivyClient } from '@privy-io/node';
 
 import a2aRoutes from './a2a-endpoints.js';
 import crossChainRoutes from './cross-chain-endpoints.js';
@@ -62,6 +63,12 @@ app.onError((err, c) => {
 });
 
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
+
+// Privy client for server-side auth verification
+const privyClient = new PrivyClient({
+  appId: 'cmlbxd3qu00jqi80c4pibohzv',
+  appSecret: process.env.PRIVY_APP_SECRET || '',
+});
 
 // Helper: decode base64-encoded platform API keys (bypasses Railway env var scanner)
 function getPlatformKey(name: string): string | undefined {
@@ -3954,21 +3961,41 @@ app.post('/auth/login-wallet', async (c) => {
 // POST /auth/login-privy
 app.post('/auth/login-privy', async (c) => {
   try {
-    const { privyId, email, walletAddress, displayName } = await c.req.json();
+    const body = await c.req.json();
+    const { privyId: rawPrivyId, email, walletAddress, displayName, accessToken } = body;
     
-    if (!privyId) {
-      return c.json({ error: 'privyId required' }, 400);
+    // Try to get access token from body or Authorization header
+    const token = accessToken || c.req.header('Authorization')?.replace('Bearer ', '');
+    
+    let verifiedPrivyId: string;
+    
+    if (token) {
+      // Verify the Privy access token (SECURE PATH)
+      try {
+        const verifiedClaims = await privyClient.utils().auth().verifyAccessToken(token);
+        verifiedPrivyId = verifiedClaims.user_id;
+        console.log('[SECURE] Privy token verified for user:', verifiedPrivyId);
+      } catch (verifyError: any) {
+        console.error('Privy token verification failed:', verifyError.message);
+        return c.json({ error: 'Invalid or expired access token' }, 401);
+      }
+    } else if (rawPrivyId) {
+      // Backwards compatibility: accept raw privyId (INSECURE, DEPRECATED)
+      console.warn('[DEPRECATED] Login with raw privyId (unverified). User should send accessToken. privyId:', rawPrivyId);
+      verifiedPrivyId = rawPrivyId;
+    } else {
+      return c.json({ error: 'Either accessToken or privyId required' }, 400);
     }
     
     // Find or create user by Privy ID
     let user = await prisma.user.findUnique({
-      where: { privyId }
+      where: { privyId: verifiedPrivyId }
     });
     
     if (!user) {
       user = await prisma.user.create({
         data: {
-          privyId,
+          privyId: verifiedPrivyId,
           email,
           walletAddress,
           displayName,
