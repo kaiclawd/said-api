@@ -2302,19 +2302,65 @@ app.post('/api/platforms/said-hosting/confirm', async (c) => {
       throw broadcastError;
     }
     
-    // Confirm
-    const confirmation = await connection.confirmTransaction({
-      signature: txHash,
-      blockhash: tx.recentBlockhash!,
-      lastValidBlockHeight: tx.lastValidBlockHeight!,
-    }, 'confirmed');
+    // Confirm transaction using robust strategy:
+    // 1. Try getSignatureStatuses (doesn't need blockhash)
+    // 2. If that fails with block height errors, query PDA directly
+    // 3. Only fail if both methods confirm no registration
     
-    if (confirmation.value.err) {
-      return c.json({ 
-        error: 'Transaction failed on-chain',
-        txHash,
-        details: JSON.stringify(confirmation.value.err),
-      }, 500);
+    let txConfirmed = false;
+    let confirmationError: any = null;
+    
+    try {
+      // Method 1: Use getSignatureStatuses (more reliable for older transactions)
+      const statuses = await connection.getSignatureStatuses([txHash]);
+      const status = statuses?.value?.[0];
+      
+      if (status === null) {
+        // Transaction not found yet, but might be too recent
+        // Fall through to PDA check
+        console.log('[SAID Hosting] Transaction not found in getSignatureStatuses, checking PDA...');
+      } else if (status.err) {
+        // Transaction explicitly failed
+        return c.json({ 
+          error: 'Transaction failed on-chain',
+          txHash,
+          details: JSON.stringify(status.err),
+        }, 500);
+      } else if (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized') {
+        // Success via getSignatureStatuses
+        txConfirmed = true;
+        console.log(`[SAID Hosting] Transaction confirmed via getSignatureStatuses: ${status.confirmationStatus}`);
+      }
+    } catch (statusError: any) {
+      console.log('[SAID Hosting] getSignatureStatuses failed:', statusError.message);
+      confirmationError = statusError;
+      // Fall through to PDA check
+    }
+    
+    // Method 2: If getSignatureStatuses didn't confirm, check PDA directly
+    if (!txConfirmed) {
+      console.log('[SAID Hosting] Checking PDA directly to verify registration...');
+      const agentPubkey = new PublicKey(wallet);
+      const [pda] = PublicKey.findProgramAddressSync(
+        [Buffer.from('agent'), agentPubkey.toBuffer()],
+        SAID_PROGRAM_ID
+      );
+      
+      const pdaInfo = await connection.getAccountInfo(pda);
+      if (!pdaInfo) {
+        // PDA doesn't exist - transaction really did fail
+        return c.json({
+          error: 'Transaction broadcast but registration not confirmed on-chain',
+          txHash,
+          explorer: `https://solscan.io/tx/${txHash}`,
+          details: confirmationError?.message || 'PDA not found',
+          hint: 'Check explorer - transaction may still be processing',
+        }, 500);
+      }
+      
+      // PDA exists! Transaction succeeded even though confirmation failed
+      txConfirmed = true;
+      console.log('[SAID Hosting] PDA exists on-chain - registration succeeded despite confirmation error');
     }
     
     // Success! Update database
