@@ -2268,7 +2268,7 @@ app.post('/api/platforms/said-hosting/confirm', async (c) => {
   }
   
   try {
-    // Deserialize and broadcast
+    // Deserialize transaction
     const txBuffer = Buffer.from(signedTransaction, 'base64');
     const tx = Transaction.from(txBuffer);
     
@@ -2279,7 +2279,12 @@ app.post('/api/platforms/said-hosting/confirm', async (c) => {
       return c.json({ error: 'Transaction must be signed by the agent wallet' }, 400);
     }
     
-    // Broadcast
+    // Refresh blockhash to prevent expiration (bootstrap can take >60s)
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+    tx.recentBlockhash = blockhash;
+    tx.lastValidBlockHeight = lastValidBlockHeight;
+    
+    // Broadcast with fresh blockhash
     const rawTx = tx.serialize();
     const txHash = await connection.sendRawTransaction(rawTx, {
       skipPreflight: false,
@@ -2289,8 +2294,8 @@ app.post('/api/platforms/said-hosting/confirm', async (c) => {
     // Confirm
     const confirmation = await connection.confirmTransaction({
       signature: txHash,
-      blockhash: tx.recentBlockhash!,
-      lastValidBlockHeight: tx.lastValidBlockHeight!,
+      blockhash,
+      lastValidBlockHeight,
     }, 'confirmed');
     
     if (confirmation.value.err) {
