@@ -1680,8 +1680,8 @@ app.post('/api/platforms/clawpump/register', async (c) => {
     });
   }
   
-  // Check sponsor wallet (reuse the shared SAID sponsor key)
-  const sponsorKey = process.env.SPONSOR_PRIVATE_KEY;
+  // Check sponsor wallet (reuse same sponsor key as Spawnr)
+  const sponsorKey = process.env['SPAWNR_SPONSOR_PRIVATE_KEY'];
   if (!sponsorKey) {
     return c.json({ 
       error: 'Sponsor wallet not configured. Contact SAID team.',
