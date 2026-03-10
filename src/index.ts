@@ -2113,10 +2113,10 @@ app.post('/api/platforms/said-hosting/register', async (c) => {
   }
   
   // Check sponsor wallet (reuse same sponsor key as Spawnr)
-  const sponsorKey = process.env.SPONSOR_PRIVATE_KEY;
+  const sponsorKey = process.env['SPAWNR_SPONSOR_PRIVATE_KEY'];
   if (!sponsorKey) {
     return c.json({ 
-      error: 'Sponsor wallet not configured. Contact SAID team.',
+      error: 'SAID Hosting sponsor wallet not configured. Contact SAID team.',
       support: 'contact@saidprotocol.com'
     }, 500);
   }
