@@ -31,6 +31,7 @@ import { PrivyClient } from '@privy-io/node';
 
 import a2aRoutes from './a2a-endpoints.js';
 import crossChainRoutes from './cross-chain-endpoints.js';
+import marketplaceRoutes from './routes/marketplace.js';
 import { setupWebSocket } from './ws-handler.js';
 import { createX402Middleware, getFreeTierInfo, CHAINS, FREE_MESSAGES_PER_DAY, MESSAGE_PRICE, bodyCache } from './x402-config.js';
 // Verify a Solana wallet signature
@@ -5888,6 +5889,10 @@ syncAgentsFromChain();
 // Mount A2A routes
 app.route('/a2a', a2aRoutes);
 console.log('✅ A2A Protocol endpoints mounted');
+
+// Mount Marketplace routes
+app.route('/marketplace', marketplaceRoutes);
+console.log('✅ Marketplace endpoints mounted');
 
 // Pre-cache request body BEFORE x402 middleware runs.
 // Hono's c.req.json() can only be called once; the x402 middleware may consume it,
