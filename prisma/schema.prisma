@@ -327,3 +327,109 @@ model WalletLink {
   @@index([wallet])
   @@index([agentPda])
 }
+
+// ========================================
+// MARKETPLACE MODELS
+// ========================================
+
+model AgentListing {
+  id          String   @id @default(cuid())
+  agentWallet String   // Must have verified SAID passport
+  
+  // Listing details
+  title       String
+  description String   @db.Text
+  skills      String[] @default([])
+  
+  // Pricing (at least one required)
+  priceSOL    Float?
+  priceUSDC   Float?
+  hourlyRate  Float?
+  
+  // Status
+  available   Boolean  @default(true)
+  featured    Boolean  @default(false)
+  
+  // Stats (computed from jobs)
+  jobsCompleted Int     @default(0)
+  rating        Float?  // Average rating
+  totalEarned   Float   @default(0)
+  
+  // Timestamps
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  jobs        Job[]
+  reviews     Review[]
+  
+  @@index([agentWallet])
+  @@index([available])
+  @@index([rating])
+  @@index([featured])
+}
+
+model Job {
+  id          String   @id @default(cuid())
+  
+  // References
+  listingId   String
+  listing     AgentListing @relation(fields: [listingId], references: [id])
+  
+  // Participants
+  clientWallet String  // Wallet hiring the agent
+  agentWallet  String  // Cached from listing
+  
+  // Job details
+  title        String
+  description  String   @db.Text
+  budgetSOL    Float?
+  budgetUSDC   Float?
+  
+  // Status flow: pending -> accepted -> in_progress -> completed/cancelled/disputed
+  status      String   @default("pending")
+  
+  // Escrow tracking
+  escrowTx    String?  // Transaction hash for escrow deposit
+  releaseTx   String?  // Transaction hash for payment release
+  
+  // Timestamps
+  acceptedAt  DateTime?
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  review      Review?
+  
+  @@index([listingId])
+  @@index([clientWallet])
+  @@index([agentWallet])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model Review {
+  id          String   @id @default(cuid())
+  
+  // References
+  jobId       String   @unique
+  job         Job      @relation(fields: [jobId], references: [id])
+  listingId   String
+  listing     AgentListing @relation(fields: [listingId], references: [id])
+  
+  // Review content
+  rating      Int      // 1-5 stars
+  comment     String?  @db.Text
+  reviewerWallet String // Client who left review
+  
+  // Verification (optional on-chain anchor)
+  signature   String?
+  txHash      String?
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([listingId])
+  @@index([rating])
+}
