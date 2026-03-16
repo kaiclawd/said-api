@@ -46,6 +46,11 @@ model Agent {
   passportMintedAt    DateTime?
   passportTxHash      String?
 
+  // Metaplex Agent Registry (MPL Core NFT)
+  metaplexAsset       String?
+  metaplexUri         String?
+  snsDomain           String?
+
   // Reputation
   reputationScore Float   @default(0)
   feedbackCount   Int     @default(0)

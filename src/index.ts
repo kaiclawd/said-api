@@ -33,6 +33,7 @@ import a2aRoutes from './a2a-endpoints.js';
 import crossChainRoutes from './cross-chain-endpoints.js';
 import { setupWebSocket } from './ws-handler.js';
 import { createX402Middleware, getFreeTierInfo, CHAINS, FREE_MESSAGES_PER_DAY, MESSAGE_PRICE, bodyCache } from './x402-config.js';
+import { mintAgentNFT, isMetaplexEnabled } from './metaplex.js';
 // Verify a Solana wallet signature
 function verifySignature(message: string, signature: string, walletAddress: string): boolean {
   try {
@@ -943,6 +944,33 @@ app.post('/api/register/sponsored', async (c) => {
     
     emitAgentEvent('agent:registered', { wallet, name: card.name, source: 'sponsored' });
     
+    // Mint Metaplex Core NFT (non-blocking — don't fail registration if this fails)
+    let metaplexAsset: string | null = null;
+    if (isMetaplexEnabled()) {
+      try {
+        const nftResult = await mintAgentNFT({
+          wallet,
+          name: card.name,
+          description: card.description,
+          twitter: card.twitter,
+          website: card.website,
+          capabilities: card.capabilities,
+        });
+        if (nftResult.success && nftResult.assetAddress) {
+          metaplexAsset = nftResult.assetAddress;
+          await prisma.agent.update({
+            where: { wallet },
+            data: { metaplexAsset: nftResult.assetAddress },
+          });
+          console.log(`[register] Metaplex NFT minted for ${name}: ${nftResult.assetAddress}`);
+        } else {
+          console.warn(`[register] Metaplex mint failed for ${name}: ${nftResult.error}`);
+        }
+      } catch (e) {
+        console.warn('[register] Metaplex mint error (non-blocking):', e);
+      }
+    }
+
     // Get remaining slots for response
     const remainingSlots = SPONSOR_POOL_MAX - (sponsorship.used + 1);
     
@@ -956,6 +984,7 @@ app.post('/api/register/sponsored', async (c) => {
       profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
       badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
       slotsRemaining: remainingSlots,
+      ...(metaplexAsset && { metaplexAsset }),
     });
     
   } catch (error: any) {
