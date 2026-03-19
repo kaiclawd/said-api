@@ -4859,14 +4859,14 @@ async function syncAgentsFromChain(): Promise<{ synced: number; updated: number;
               data: {
                 isVerified,
                 verifiedAt: isVerified && !existing.verifiedAt ? new Date(validCreatedAt * 1000) : existing.verifiedAt,
-                metadataUri,
+                metadataUri: sanitize(metadataUri),
                 lastSyncedAt: new Date(),
                 registrationSource: source,
-                ...(card.name && { name: card.name }),
-                ...(card.description && { description: card.description }),
-                ...(card.twitter && { twitter: card.twitter }),
-                ...(card.image && { image: card.image }),
-                ...(card.website && { website: card.website }),
+                ...(card.name && { name: sanitize(card.name) }),
+                ...(card.description && { description: sanitize(card.description) }),
+                ...(card.twitter && { twitter: sanitize(card.twitter) }),
+                ...(card.image && { image: sanitize(card.image) }),
+                ...(card.website && { website: sanitize(card.website) }),
               }
             });
             stats.updated++;
