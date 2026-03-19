@@ -53,16 +53,7 @@ function getFeedbackMessage(fromWallet: string, toWallet: string, score: number,
 
 config();
 
-// Singleton PrismaClient — export for other modules to import
-const prisma = new PrismaClient({
-  datasources: {
-    db: {
-      url: process.env.DATABASE_URL?.includes('connection_limit')
-        ? process.env.DATABASE_URL
-        : `${process.env.DATABASE_URL}&connection_limit=10`,
-    },
-  },
-});
+const prisma = new PrismaClient();
 export { prisma as sharedPrisma };
 const app = new Hono();
 
