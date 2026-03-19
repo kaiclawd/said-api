@@ -97,10 +97,12 @@ app.use('/*', cors({
   origin: [
     'https://www.saidprotocol.com',
     'https://saidprotocol.com',
+    'https://host.saidprotocol.com',
     'http://localhost:3000',
     'https://devoted-cooperation-production-8f30.up.railway.app',
     'https://staging-v2-production.up.railway.app',
-    'https://agent-creation-new-production.up.railway.app'
+    'https://agent-creation-new-production.up.railway.app',
+    'https://hosting-site-test-production.up.railway.app'
   ],
   allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization'],
