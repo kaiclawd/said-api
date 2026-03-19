@@ -53,16 +53,10 @@ function getFeedbackMessage(fromWallet: string, toWallet: string, score: number,
 
 config();
 
-// Singleton PrismaClient — export for other modules to import
-const prisma = new PrismaClient({
-  datasources: {
-    db: {
-      url: process.env.DATABASE_URL?.includes('connection_limit')
-        ? process.env.DATABASE_URL
-        : `${process.env.DATABASE_URL}&connection_limit=10`,
-    },
-  },
-});
+// Singleton PrismaClient
+// NOTE: Set connection_limit in DATABASE_URL on Railway directly, e.g.:
+// postgresql://user:pass@host:5432/railway?connection_limit=10
+const prisma = new PrismaClient();
 export { prisma as sharedPrisma };
 const app = new Hono();
 
