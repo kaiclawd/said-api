@@ -53,7 +53,17 @@ function getFeedbackMessage(fromWallet: string, toWallet: string, score: number,
 
 config();
 
-const prisma = new PrismaClient();
+// Singleton PrismaClient — export for other modules to import
+const prisma = new PrismaClient({
+  datasources: {
+    db: {
+      url: process.env.DATABASE_URL?.includes('connection_limit')
+        ? process.env.DATABASE_URL
+        : `${process.env.DATABASE_URL}&connection_limit=10`,
+    },
+  },
+});
+export { prisma as sharedPrisma };
 const app = new Hono();
 
 // Global error handler — catch and log all errors
@@ -107,6 +117,40 @@ app.use('/*', cors({
   allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization'],
 }));
+
+// ============ Rate Limiting ============
+// Simple in-memory rate limiter: 60 requests per minute per IP
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+const RATE_LIMIT = 60; // requests per window
+const RATE_WINDOW = 60_000; // 1 minute
+
+app.use('/*', async (c, next) => {
+  const ip = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 
+             c.req.header('x-real-ip') || 
+             'unknown';
+  
+  const now = Date.now();
+  const entry = rateLimitMap.get(ip);
+  
+  if (!entry || now > entry.resetAt) {
+    rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_WINDOW });
+  } else {
+    entry.count++;
+    if (entry.count > RATE_LIMIT) {
+      console.warn(`[rate-limit] IP ${ip} exceeded ${RATE_LIMIT} req/min`);
+      return c.json({ error: 'Too many requests. Please slow down.' }, 429);
+    }
+  }
+  
+  // Cleanup old entries every 5 minutes
+  if (Math.random() < 0.01) {
+    for (const [key, val] of rateLimitMap) {
+      if (now > val.resetAt) rateLimitMap.delete(key);
+    }
+  }
+  
+  await next();
+});
 
 // ============ SSE (Server-Sent Events) ============
 // Real-time notifications for frontend (new agents, verifications, etc.)
