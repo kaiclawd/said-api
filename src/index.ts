@@ -4474,12 +4474,12 @@ app.post('/auth/login-privy', async (c) => {
         console.error('Privy token verification failed:', verifyError.message);
         return c.json({ error: 'Invalid or expired access token' }, 401);
       }
-    } else if (rawPrivyId) {
-      // Backwards compatibility: accept raw privyId (INSECURE, DEPRECATED)
-      console.warn('[DEPRECATED] Login with raw privyId (unverified). User should send accessToken. privyId:', rawPrivyId);
-      verifiedPrivyId = rawPrivyId;
     } else {
-      return c.json({ error: 'Either accessToken or privyId required' }, 400);
+      // Raw privyId without accessToken is no longer accepted (security fix 2026-03-18)
+      if (rawPrivyId) {
+        console.warn('[BLOCKED] Rejected raw privyId login attempt (no accessToken). privyId:', rawPrivyId);
+      }
+      return c.json({ error: 'accessToken required. Raw privyId login is no longer supported.' }, 401);
     }
     
     // Find or create user by Privy ID
@@ -4815,6 +4815,9 @@ async function syncAgentsFromChain(): Promise<{ synced: number; updated: number;
           }
         }
         
+        // Sanitize strings: strip null bytes that break PostgreSQL UTF-8 encoding
+        const sanitize = (s: any) => typeof s === 'string' ? s.replace(/\x00/g, '') : s;
+
         if (!existing) {
           // NEW agent — insert
           await prisma.agent.create({
@@ -4822,18 +4825,18 @@ async function syncAgentsFromChain(): Promise<{ synced: number; updated: number;
               wallet: owner,
               pda: pdaStr,
               owner,
-              metadataUri,
+              metadataUri: sanitize(metadataUri),
               registeredAt: new Date(validCreatedAt * 1000),
               isVerified,
               verifiedAt: isVerified ? new Date(validCreatedAt * 1000) : null,
-              name: card.name || undefined,
-              description: card.description || undefined,
-              twitter: card.twitter || undefined,
-              image: card.image || undefined,
-              website: card.website || undefined,
-              mcpEndpoint: card.mcpEndpoint || undefined,
-              a2aEndpoint: card.a2aEndpoint || undefined,
-              x402Wallet: card.x402Wallet || undefined,
+              name: sanitize(card.name) || undefined,
+              description: sanitize(card.description) || undefined,
+              twitter: sanitize(card.twitter) || undefined,
+              image: sanitize(card.image) || undefined,
+              website: sanitize(card.website) || undefined,
+              mcpEndpoint: sanitize(card.mcpEndpoint) || undefined,
+              a2aEndpoint: sanitize(card.a2aEndpoint) || undefined,
+              x402Wallet: sanitize(card.x402Wallet) || undefined,
               serviceTypes: card.serviceTypes || [],
               skills: card.capabilities || card.skills || [],
               registrationSource: card.platform === 'spawnr.io' ? 'spawnr' 
