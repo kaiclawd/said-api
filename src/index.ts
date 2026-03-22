@@ -2374,30 +2374,38 @@ app.post('/api/platforms/said-hosting/confirm', async (c) => {
       // Fall through to PDA check
     }
     
-    // Method 2: If getSignatureStatuses didn't confirm, check PDA directly
+    // Method 2: If getSignatureStatuses didn't confirm, poll PDA with retries
     if (!txConfirmed) {
-      console.log('[SAID Hosting] Checking PDA directly to verify registration...');
+      console.log('[SAID Hosting] Polling PDA to verify registration (up to 30s)...');
       const agentPubkey = new PublicKey(wallet);
       const [pda] = PublicKey.findProgramAddressSync(
         [Buffer.from('agent'), agentPubkey.toBuffer()],
         SAID_PROGRAM_ID
       );
       
-      const pdaInfo = await connection.getAccountInfo(pda);
-      if (!pdaInfo) {
-        // PDA doesn't exist - transaction really did fail
+      // Poll every 3 seconds for up to 30 seconds
+      for (let attempt = 0; attempt < 10; attempt++) {
+        if (attempt > 0) {
+          await new Promise(r => setTimeout(r, 3000));
+        }
+        const pdaInfo = await connection.getAccountInfo(pda);
+        if (pdaInfo) {
+          txConfirmed = true;
+          console.log(`[SAID Hosting] PDA found on attempt ${attempt + 1} - registration succeeded`);
+          break;
+        }
+        console.log(`[SAID Hosting] PDA not found yet (attempt ${attempt + 1}/10)...`);
+      }
+      
+      if (!txConfirmed) {
         return c.json({
-          error: 'Transaction broadcast but registration not confirmed on-chain',
+          error: 'Transaction broadcast but registration not confirmed on-chain after 30s',
           txHash,
           explorer: `https://solscan.io/tx/${txHash}`,
-          details: confirmationError?.message || 'PDA not found',
+          details: confirmationError?.message || 'PDA not found after polling',
           hint: 'Check explorer - transaction may still be processing',
         }, 500);
       }
-      
-      // PDA exists! Transaction succeeded even though confirmation failed
-      txConfirmed = true;
-      console.log('[SAID Hosting] PDA exists on-chain - registration succeeded despite confirmation error');
     }
     
     // Success! Update database
