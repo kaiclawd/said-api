@@ -5087,6 +5087,46 @@ app.get('/admin/delete-agent/:id', async (c) => {
   return c.json({ ok: true, deleted: id });
 });
 
+// Admin: Re-sync agent metadata from URIs
+// POST /admin/resync-metadata  { filter: "atelier" | "all", dryRun: true|false }
+app.post('/admin/resync-metadata', async (c) => {
+  if (!checkAdminAuth(c)) return c.notFound();
+  const { filter = 'atelier', dryRun = true } = await c.req.json().catch(() => ({}));
+  
+  const where: any = { metadataUri: { not: null } };
+  if (filter === 'atelier') {
+    where.metadataUri = { contains: 'atelierai.xyz' };
+  } else {
+    where.OR = [{ name: null }, { name: '' }];
+  }
+  
+  const agents = await prisma.agent.findMany({ where, select: { wallet: true, name: true, metadataUri: true } });
+  const results: any[] = [];
+  
+  for (const agent of agents) {
+    try {
+      const res = await fetch(agent.metadataUri!, { signal: AbortSignal.timeout(5000) });
+      if (!res.ok) { results.push({ wallet: agent.wallet, status: 'http_error', code: res.status }); continue; }
+      const card = await res.json();
+      if (card.error || !card.name) { results.push({ wallet: agent.wallet, status: 'no_name', error: card.error }); continue; }
+      if (agent.name === card.name) { results.push({ wallet: agent.wallet, status: 'skipped', name: card.name }); continue; }
+      
+      if (!dryRun) {
+        await prisma.agent.update({
+          where: { wallet: agent.wallet },
+          data: { name: card.name, description: card.description || undefined, image: card.image || undefined }
+        });
+      }
+      results.push({ wallet: agent.wallet, status: dryRun ? 'would_update' : 'updated', from: agent.name, to: card.name });
+    } catch (err: any) {
+      results.push({ wallet: agent.wallet, status: 'error', message: err.message });
+    }
+  }
+  
+  const updated = results.filter(r => r.status === 'updated' || r.status === 'would_update').length;
+  return c.json({ dryRun, filter, total: agents.length, updated, results });
+});
+
 // ==================== PASSPORT API ====================
 
 // GET /api/verify/:wallet - Check if agent is registered and verified
