@@ -147,6 +147,7 @@ app.use('/*', async (c, next) => {
 // Real-time notifications for frontend (new agents, verifications, etc.)
 
 import { EventEmitter } from 'events';
+import { createScoreRoutes, initScoreWorker } from './score-engine.js';
 const sseEmitter = new EventEmitter();
 sseEmitter.setMaxListeners(100); // support up to 100 concurrent SSE clients
 
