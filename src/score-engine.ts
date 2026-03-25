@@ -426,9 +426,9 @@ async function fetchFairScaleScore(wallet: string): Promise<{ score: number; max
     const timeout = setTimeout(() => controller.abort(), FAIRSCALE_TIMEOUT);
 
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+    if (apiKey) headers['fairkey'] = apiKey;
 
-    const res = await fetch(`${apiUrl}/score/${wallet}`, {
+    const res = await fetch(`${apiUrl}/score?wallet=${wallet}`, {
       signal: controller.signal,
       headers,
     });
@@ -436,11 +436,12 @@ async function fetchFairScaleScore(wallet: string): Promise<{ score: number; max
 
     if (!res.ok) return null;
 
-    const data = await res.json() as { score?: number; max?: number };
-    if (typeof data.score !== 'number') return null;
+    const data = await res.json() as { fairscore?: number; fairscore_base?: number; score?: number; max?: number };
+    const score = data.fairscore ?? data.score;
+    if (typeof score !== 'number') return null;
 
     return {
-      score: data.score,
+      score,
       max: data.max || 100,
     };
   } catch {
