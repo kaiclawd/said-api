@@ -6002,6 +6002,12 @@ console.log(`✅ Supported payment chains: ${Object.keys(CHAINS).join(', ')}`);
 
 app.route('/xchain', crossChainRoutes);
 console.log('✅ Cross-Chain Communication endpoints mounted');
+
+// Mount Trust Score engine
+app.route('/api/score', createScoreRoutes(prisma, connection));
+initScoreWorker(prisma, connection);
+console.log('✅ Trust Score engine mounted (GET /api/score/:wallet)');
+
 setInterval(syncAgentsFromChain, 5 * 60 * 1000);
 
 const server = serve({ fetch: app.fetch, port }, (info) => {
