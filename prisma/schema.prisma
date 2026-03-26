@@ -62,6 +62,7 @@ model Agent {
   attestationsGiven    Attestation[] @relation("AttestationsGiven")
   createdByUsers   UserAgent[]
   capabilities     Capability[]
+  trustScore       AgentScore?
 
   @@index([name])
   @@index([reputationScore])
@@ -310,6 +311,39 @@ model A2AMessage {
   @@index([fromWallet])
   @@index([status])
   @@index([createdAt])
+}
+
+model AgentScore {
+  id              String    @id @default(cuid())
+  wallet          String    @unique
+  score           Int       @default(0)       // 0-100
+  tier            String    @default("unverified")
+  
+  // SAID Engine breakdown (recomputed every 6h)
+  identity        Float     @default(0)
+  activity        Float     @default(0)
+  economic        Float     @default(0)
+  ecosystem       Float     @default(0)
+  longevity       Float     @default(0)
+  
+  // FairScale enrichment (recomputed every 7d)
+  fairscale       Float     @default(0)
+  fairscaleRaw    Json?     // Raw FairScale API response
+  fairscaleAt     DateTime? // When FairScale was last fetched
+  
+  badges          String[]  @default([])
+  flags           String[]  @default([])
+  sources         String[]  @default(["said"])
+  
+  computedAt      DateTime  @default(now())   // Last full computation
+  lastQueriedAt   DateTime  @default(now())   // Last time someone requested this score
+  
+  agent           Agent     @relation(fields: [wallet], references: [wallet])
+  
+  @@index([score(sort: Desc)])
+  @@index([tier])
+  @@index([computedAt])
+  @@index([lastQueriedAt])
 }
 
 model WalletLink {

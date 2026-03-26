@@ -493,7 +493,7 @@ async function computeFullScore(
   };
 }
 
-// ─── Cache Layer ──────────────────────────────────────────────────
+// ─── Redis Cache Layer ────────────────────────────────────────────
 
 async function getCachedScore(wallet: string): Promise<ScoreResult | null> {
   const r = getRedis();
@@ -521,6 +521,94 @@ async function setCachedScore(wallet: string, result: ScoreResult): Promise<void
   }
 }
 
+// ─── Postgres Persistence Layer ───────────────────────────────────
+
+const SAID_STALE_HOURS = 6;
+const FAIRSCALE_STALE_DAYS = 7;
+
+async function getStoredScore(wallet: string, prisma: PrismaClient): Promise<ScoreResult | null> {
+  try {
+    const row = await prisma.agentScore.findUnique({ where: { wallet } });
+    if (!row) return null;
+
+    return {
+      wallet: row.wallet,
+      score: row.score,
+      tier: row.tier as ScoreResult['tier'],
+      breakdown: {
+        identity: row.identity,
+        activity: row.activity,
+        economic: row.economic,
+        ecosystem: row.ecosystem,
+        longevity: row.longevity,
+        fairscale_enrichment: row.fairscale,
+      },
+      badges: row.badges,
+      flags: row.flags,
+      sources: row.sources,
+      cached: true,
+      updated: row.computedAt.toISOString(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isSaidStale(computedAt: Date): boolean {
+  return Date.now() - computedAt.getTime() > SAID_STALE_HOURS * 60 * 60 * 1000;
+}
+
+function isFairscaleStale(fairscaleAt: Date | null): boolean {
+  if (!fairscaleAt) return true;
+  return Date.now() - fairscaleAt.getTime() > FAIRSCALE_STALE_DAYS * 24 * 60 * 60 * 1000;
+}
+
+async function persistScore(
+  wallet: string,
+  result: ScoreResult,
+  fairscaleRaw: any | null,
+  prisma: PrismaClient,
+): Promise<void> {
+  try {
+    const data = {
+      score: result.score,
+      tier: result.tier,
+      identity: result.breakdown.identity,
+      activity: result.breakdown.activity,
+      economic: result.breakdown.economic,
+      ecosystem: result.breakdown.ecosystem,
+      longevity: result.breakdown.longevity,
+      fairscale: result.breakdown.fairscale_enrichment,
+      fairscaleRaw: fairscaleRaw ?? undefined,
+      fairscaleAt: fairscaleRaw ? new Date() : undefined,
+      badges: result.badges,
+      flags: result.flags,
+      sources: result.sources,
+      computedAt: new Date(),
+      lastQueriedAt: new Date(),
+    };
+
+    await prisma.agentScore.upsert({
+      where: { wallet },
+      create: { wallet, ...data },
+      update: data,
+    });
+  } catch (err: any) {
+    console.error(`[Score] DB persist failed for ${wallet}:`, err.message);
+  }
+}
+
+async function touchLastQueried(wallet: string, prisma: PrismaClient): Promise<void> {
+  try {
+    await prisma.agentScore.update({
+      where: { wallet },
+      data: { lastQueriedAt: new Date() },
+    });
+  } catch {
+    // Non-critical — score may not exist yet
+  }
+}
+
 // ─── Queue: Background Refresh ────────────────────────────────────
 
 export function initScoreWorker(prisma: PrismaClient, connection: Connection): void {
@@ -528,12 +616,53 @@ export function initScoreWorker(prisma: PrismaClient, connection: Connection): v
   if (!url) return;
 
   try {
+    // Worker handles both SAID-only and full (SAID + FairScale) refreshes
     scoreWorker = new Worker(
       'score-refresh',
       async (job) => {
-        const { wallet } = job.data as { wallet: string };
-        console.log(`[Score Worker] Refreshing score for ${wallet}`);
-        const result = await computeFullScore(wallet, prisma, connection);
+        const { wallet, includeFairscale } = job.data as { wallet: string; includeFairscale?: boolean };
+        console.log(`[Score Worker] Refreshing ${wallet} (fairscale=${!!includeFairscale})`);
+
+        let result: ScoreResult;
+        let fairscaleRaw: any = null;
+
+        if (includeFairscale) {
+          result = await computeFullScore(wallet, prisma, connection);
+          // Try to capture raw FairScale response
+          const fs = await fetchFairScaleScore(wallet);
+          fairscaleRaw = fs;
+        } else {
+          // SAID-only refresh — reuse existing FairScale data from DB
+          const existing = await prisma.agentScore.findUnique({ where: { wallet } });
+          const saidResult = await computeSAIDScore(wallet, prisma, connection);
+
+          let fairscaleContribution = existing?.fairscale ?? 0;
+          const sources: string[] = ['said'];
+          if (fairscaleContribution > 0) sources.push('fairscale');
+
+          const finalScore = Math.round(Math.min(100, Math.max(0,
+            fairscaleContribution > 0
+              ? saidResult.score + fairscaleContribution
+              : (saidResult.score / 70) * 100
+          )));
+
+          result = {
+            wallet,
+            score: finalScore,
+            tier: getTier(finalScore),
+            breakdown: {
+              ...saidResult.breakdown,
+              fairscale_enrichment: Math.round(fairscaleContribution * 10) / 10,
+            },
+            badges: saidResult.badges,
+            flags: saidResult.flags,
+            sources,
+            cached: false,
+            updated: new Date().toISOString(),
+          };
+        }
+
+        await persistScore(wallet, result, fairscaleRaw, prisma);
         await setCachedScore(wallet, result);
         console.log(`[Score Worker] Done — ${wallet} score=${result.score}`);
       },
@@ -542,18 +671,72 @@ export function initScoreWorker(prisma: PrismaClient, connection: Connection): v
     scoreWorker.on('failed', (job, err) => {
       console.error(`[Score Worker] Job ${job?.id} failed:`, err.message);
     });
+
+    // Schedule recurring refresh jobs
+    scheduleBatchRefresh(prisma);
+
     console.log('[Score] Background worker started');
   } catch (err) {
     console.error('[Score] Worker init failed:', err);
   }
 }
 
-async function enqueueRefresh(wallet: string): Promise<void> {
+async function scheduleBatchRefresh(prisma: PrismaClient): Promise<void> {
+  const q = getQueue();
+  if (!q) return;
+
+  // SAID refresh: every 6 hours — rescore agents queried in last 7 days
+  setInterval(async () => {
+    try {
+      const staleAgents = await prisma.agentScore.findMany({
+        where: {
+          lastQueriedAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+          computedAt: { lt: new Date(Date.now() - SAID_STALE_HOURS * 60 * 60 * 1000) },
+        },
+        select: { wallet: true },
+      });
+      console.log(`[Score] Queuing ${staleAgents.length} SAID-only refreshes`);
+      for (const agent of staleAgents) {
+        await q.add('refresh', { wallet: agent.wallet, includeFairscale: false }, {
+          jobId: `said-${agent.wallet}-${Date.now()}`,
+        });
+      }
+    } catch (err: any) {
+      console.error('[Score] SAID batch refresh failed:', err.message);
+    }
+  }, SAID_STALE_HOURS * 60 * 60 * 1000);
+
+  // FairScale refresh: daily — only agents queried in last 7 days with stale FairScale
+  setInterval(async () => {
+    try {
+      const needsFairscale = await prisma.agentScore.findMany({
+        where: {
+          lastQueriedAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+          OR: [
+            { fairscaleAt: null },
+            { fairscaleAt: { lt: new Date(Date.now() - FAIRSCALE_STALE_DAYS * 24 * 60 * 60 * 1000) } },
+          ],
+        },
+        select: { wallet: true },
+      });
+      console.log(`[Score] Queuing ${needsFairscale.length} FairScale refreshes`);
+      for (const agent of needsFairscale) {
+        await q.add('refresh', { wallet: agent.wallet, includeFairscale: true }, {
+          jobId: `fs-${agent.wallet}-${Date.now()}`,
+        });
+      }
+    } catch (err: any) {
+      console.error('[Score] FairScale batch refresh failed:', err.message);
+    }
+  }, 24 * 60 * 60 * 1000); // Daily
+}
+
+async function enqueueRefresh(wallet: string, includeFairscale = false): Promise<void> {
   const q = getQueue();
   if (!q) return;
   try {
-    await q.add('refresh', { wallet }, {
-      jobId: `score-${wallet}`,
+    await q.add('refresh', { wallet, includeFairscale }, {
+      jobId: `score-${wallet}-${Date.now()}`,
       delay: 0,
     });
   } catch {
@@ -574,10 +757,13 @@ export function createScoreRoutes(prisma: PrismaClient, connection: Connection):
       return c.json({ error: 'Invalid wallet address' }, 400);
     }
 
-    // Check cache first
+    // Tier 1: Redis cache
     const cached = await getCachedScore(wallet);
     if (cached) {
-      // Queue background refresh if stale (> 5 hours = approaching 6h TTL)
+      // Update lastQueriedAt in DB (non-blocking)
+      touchLastQueried(wallet, prisma);
+
+      // Queue SAID refresh if approaching TTL
       const updatedAt = new Date(cached.updated).getTime();
       if (Date.now() - updatedAt > 5 * 60 * 60 * 1000) {
         enqueueRefresh(wallet);
@@ -585,11 +771,32 @@ export function createScoreRoutes(prisma: PrismaClient, connection: Connection):
       return c.json(cached);
     }
 
-    // Compute fresh score
+    // Tier 2: Postgres
+    const stored = await getStoredScore(wallet, prisma);
+    if (stored) {
+      // Re-populate Redis cache
+      setCachedScore(wallet, stored);
+
+      // Update lastQueriedAt
+      touchLastQueried(wallet, prisma);
+
+      // Check if SAID data is stale — queue refresh
+      const row = await prisma.agentScore.findUnique({ where: { wallet } });
+      if (row && isSaidStale(row.computedAt)) {
+        enqueueRefresh(wallet, isFairscaleStale(row.fairscaleAt));
+      }
+
+      return c.json(stored);
+    }
+
+    // Tier 3: Compute fresh
     try {
       const result = await computeFullScore(wallet, prisma, connection);
 
-      // Cache the result (non-blocking)
+      // Persist to DB + Redis (non-blocking)
+      const fairscaleRaw = result.sources.includes('fairscale')
+        ? await fetchFairScaleScore(wallet) : null;
+      persistScore(wallet, result, fairscaleRaw, prisma);
       setCachedScore(wallet, result);
 
       return c.json(result);
