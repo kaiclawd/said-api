@@ -806,5 +806,28 @@ export function createScoreRoutes(prisma: PrismaClient, connection: Connection):
     }
   });
 
+  // Batch seed: score all agents that don't have a score yet
+  routes.post('/seed', async (c) => {
+    const agents = await prisma.agent.findMany({
+      where: {
+        trustScore: null,
+      },
+      select: { wallet: true },
+    });
+
+    if (agents.length === 0) {
+      return c.json({ message: 'All agents already scored', queued: 0 });
+    }
+
+    // Queue them all for scoring
+    let queued = 0;
+    for (const agent of agents) {
+      await enqueueRefresh(agent.wallet, true); // true = include FairScale
+      queued++;
+    }
+
+    return c.json({ message: `Queued ${queued} agents for scoring`, queued, total: agents.length });
+  });
+
   return routes;
 }
