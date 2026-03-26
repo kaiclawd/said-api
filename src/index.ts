@@ -370,6 +370,8 @@ app.get('/api/agents', async (c) => {
     ? { registeredAt: 'desc' }
     : sort === 'name'
     ? { name: 'asc' }
+    : sort === 'trust'
+    ? { trustScore: { score: 'desc' } }
     : { reputationScore: 'desc' };
   
   const agents = await prisma.agent.findMany({
@@ -378,7 +380,22 @@ app.get('/api/agents', async (c) => {
     take: Math.min(parseInt(limit || '50'), 2000),
     skip: parseInt(offset || '0'),
     include: {
-      _count: { select: { feedbackReceived: true } }
+      _count: { select: { feedbackReceived: true } },
+      trustScore: {
+        select: {
+          score: true,
+          tier: true,
+          badges: true,
+          sources: true,
+          identity: true,
+          activity: true,
+          economic: true,
+          ecosystem: true,
+          longevity: true,
+          fairscale: true,
+          computedAt: true,
+        }
+      }
     }
   });
   
@@ -398,7 +415,8 @@ app.get('/api/agents/:wallet', async (c) => {
         orderBy: { createdAt: 'desc' },
         take: 10,
       },
-      _count: { select: { feedbackReceived: true } }
+      _count: { select: { feedbackReceived: true } },
+      trustScore: true,
     }
   });
   
