@@ -367,7 +367,7 @@ model AgentWallet {
   // Relations
   transactions      TransactionRequest[]
   
-  @@unique([agentId, walletType, isPrimary])
+  @@unique([agentId, walletType])  // One wallet per type per agent
   @@index([agentId])
   @@index([publicKey])
   @@index([status])

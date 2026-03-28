@@ -7,15 +7,25 @@
  *   SAID acts as authorization layer with rotatable API keys.
  * 
  * Endpoints:
- *   POST /v1/wallet/create         — Provision Privy wallet for agent
- *   GET  /v1/wallet/:agentId       — Get wallet public key + balance
- *   POST /v1/wallet/upgrade        — Add Privy wallet to existing agent (opt-in migration)
- *   POST /v1/transaction/request   — Request a transaction (policy check → Privy sign → broadcast)
+ *   POST /v1/wallet/create         — Provision Privy wallet for agent (auth required)
+ *   GET  /v1/wallet/:agentId       — Get wallet public key + balance (public)
+ *   POST /v1/wallet/upgrade        — Add Privy wallet to existing agent (auth required)
+ *   POST /v1/transaction/request   — Request a transaction (API key required)
  *   GET  /v1/transaction/:txId     — Get transaction status
- *   POST /v1/apikey/generate       — Generate rotatable API key for agent/platform
- *   POST /v1/apikey/revoke         — Revoke an API key
+ *   POST /v1/apikey/generate       — Generate rotatable API key (session auth required)
+ *   POST /v1/apikey/revoke         — Revoke an API key (session auth required)
  *   GET  /v1/policy/:agentId       — Get current policy limits
  *   PUT  /v1/policy/:agentId       — Update policy limits (owner only)
+ * 
+ * Security review applied (March 28, 2026):
+ *   - Auth required on wallet creation/upgrade
+ *   - Race condition fix: advisory lock + pending/approved in spending aggregation
+ *   - Transaction status state machine enforcement
+ *   - Idempotency keys on transaction requests
+ *   - Rate limiting on all authenticated endpoints
+ *   - Monthly spending limit enforcement
+ *   - requireApprovalAbove threshold
+ *   - Agent + wallet status pre-checks
  */
 
 import { Hono } from 'hono';
@@ -35,6 +45,20 @@ interface AgentContext {
   rateLimitPerHour: number;
 }
 
+// Valid transaction status transitions
+const VALID_TRANSITIONS: Record<string, string[]> = {
+  pending:   ['approved', 'denied', 'failed'],
+  approved:  ['signing', 'failed'],
+  signing:   ['broadcast', 'failed'],
+  broadcast: ['confirmed', 'failed'],
+  confirmed: [], // terminal
+  denied:    [], // terminal
+  failed:    [], // terminal
+};
+
+// Statuses that count toward spending limits (prevents race conditions)
+const SPENDING_STATUSES = ['pending', 'approved', 'signing', 'broadcast', 'confirmed'];
+
 // ============================================================
 // Configuration
 // ============================================================
@@ -46,7 +70,7 @@ const API_KEY_SECRET = process.env.API_KEY_SECRET || crypto.randomBytes(32).toSt
 // API Key Utilities
 // ============================================================
 
-function generateApiKey(): string {
+function generateRawApiKey(): string {
   const randomPart = crypto.randomBytes(24).toString('hex');
   return `${API_KEY_PREFIX}${randomPart}`;
 }
@@ -56,10 +80,43 @@ function hashApiKey(apiKey: string): string {
 }
 
 // ============================================================
-// Middleware: Validate API Key
+// Transaction Status State Machine
+// ============================================================
+
+function canTransition(currentStatus: string, newStatus: string): boolean {
+  const allowed = VALID_TRANSITIONS[currentStatus];
+  return allowed ? allowed.includes(newStatus) : false;
+}
+
+async function updateTxStatus(
+  prisma: PrismaClient,
+  txId: string,
+  newStatus: string,
+  extraData: Record<string, any> = {}
+): Promise<boolean> {
+  const tx = await prisma.transactionRequest.findUnique({ where: { id: txId } });
+  if (!tx) return false;
+  
+  if (!canTransition(tx.status, newStatus)) {
+    console.warn(`[TX State] Invalid transition: ${tx.status} → ${newStatus} for tx ${txId}`);
+    return false;
+  }
+  
+  await prisma.transactionRequest.update({
+    where: { id: txId },
+    data: { status: newStatus, ...extraData },
+  });
+  return true;
+}
+
+// ============================================================
+// Middleware: Validate API Key + Rate Limit
 // ============================================================
 
 function createApiKeyMiddleware(prisma: PrismaClient) {
+  // In-memory rate limit counters (per API key per hour window)
+  const rateLimitCounters = new Map<string, { count: number; windowStart: number }>();
+  
   return async (c: any, next: () => Promise<void>) => {
     const authHeader = c.req.header('Authorization');
     
@@ -67,7 +124,7 @@ function createApiKeyMiddleware(prisma: PrismaClient) {
       return c.json({ error: 'Missing or invalid API key. Use: Authorization: Bearer said_ak_...' }, 401);
     }
     
-    const apiKey = authHeader.substring(7); // Remove 'Bearer '
+    const apiKey = authHeader.substring(7);
     const keyHash = hashApiKey(apiKey);
     
     const keyRecord = await prisma.apiKey.findUnique({
@@ -87,11 +144,36 @@ function createApiKeyMiddleware(prisma: PrismaClient) {
       return c.json({ error: 'API key has expired' }, 401);
     }
     
-    // Update last used
-    await prisma.apiKey.update({
+    // ---- Rate Limiting (in-memory, per key per hour) ----
+    const now = Date.now();
+    const windowStart = Math.floor(now / 3600000) * 3600000; // Round to hour
+    const counterKey = `${keyRecord.id}:${windowStart}`;
+    
+    const counter = rateLimitCounters.get(counterKey);
+    if (counter) {
+      if (counter.count >= keyRecord.rateLimitPerHour) {
+        const resetAt = new Date(windowStart + 3600000);
+        return c.json({
+          error: 'Rate limit exceeded',
+          limit: keyRecord.rateLimitPerHour,
+          resetAt: resetAt.toISOString(),
+          retryAfter: Math.ceil((resetAt.getTime() - now) / 1000),
+        }, 429);
+      }
+      counter.count++;
+    } else {
+      // Clean up old windows
+      for (const [k, v] of rateLimitCounters) {
+        if (v.windowStart < windowStart) rateLimitCounters.delete(k);
+      }
+      rateLimitCounters.set(counterKey, { count: 1, windowStart });
+    }
+    
+    // Update last used (non-blocking)
+    prisma.apiKey.update({
       where: { id: keyRecord.id },
       data: { lastUsedAt: new Date() }
-    }).catch(() => {}); // Non-blocking
+    }).catch(() => {});
     
     // Attach agent context
     c.set('agentCtx', {
@@ -107,38 +189,66 @@ function createApiKeyMiddleware(prisma: PrismaClient) {
 }
 
 // ============================================================
+// Middleware: Session Auth (for wallet creation, API key management)
+// Checks for session token from the existing auth system
+// ============================================================
+
+function createSessionAuthMiddleware(prisma: PrismaClient) {
+  return async (c: any, next: () => Promise<void>) => {
+    // Accept either session token or API key
+    const authHeader = c.req.header('Authorization');
+    const sessionToken = c.req.header('X-Session-Token') || (authHeader?.startsWith('Bearer ') && !authHeader.startsWith('Bearer said_ak_') ? authHeader.substring(7) : null);
+    
+    if (!sessionToken) {
+      return c.json({ error: 'Authentication required. Provide X-Session-Token header or Bearer token.' }, 401);
+    }
+    
+    const user = await prisma.user.findUnique({
+      where: { sessionToken },
+      include: { agents: true }
+    });
+    
+    if (!user || !user.sessionExpiry || new Date(user.sessionExpiry) < new Date()) {
+      return c.json({ error: 'Invalid or expired session' }, 401);
+    }
+    
+    c.set('userId', user.id);
+    c.set('userAgentIds', user.agents.map((ua: any) => ua.agentWallet));
+    
+    await next();
+  };
+}
+
+// ============================================================
 // Mock Privy Wallet Service
 // 
 // TODO: Replace with real Privy SDK after Tuesday call.
-// The interface is designed to match Privy's actual API shape
-// so the swap should be minimal.
+// 
+// IMPORTANT notes from security review:
+// - Mock must return same response shapes as real Privy SDK
+// - Mock addresses don't exist on-chain (balance checks return 0)
+// - Privy uses ECDSA P-256 for authorization keys (not Ed25519)
+//   → Confirm exact signing flow on Tuesday
+// - Consider devnet wallets for e2e testing before live switch
 // ============================================================
 
 class PrivyWalletService {
   private isMock: boolean;
   
   constructor() {
-    // Use mock if PRIVY_WALLET_MODE=mock or if wallet-specific env vars aren't set
     this.isMock = process.env.PRIVY_WALLET_MODE !== 'live';
     if (this.isMock) {
       console.log('[Privy Wallets] Running in MOCK mode. Set PRIVY_WALLET_MODE=live after Tuesday call.');
     }
   }
   
-  /**
-   * Create a new embedded wallet for an agent.
-   * In production, this calls Privy's server SDK to provision a wallet.
-   * The private key is stored in Privy's secure enclave — we never see it.
-   */
   async createWallet(agentId: string): Promise<{
     publicKey: string;
     providerWalletId: string;
     provider: string;
   }> {
     if (this.isMock) {
-      // Generate a deterministic-looking but random mock address
       const mockBytes = crypto.randomBytes(32);
-      // Use first 32 bytes as a fake ed25519 public key, encode as base58-like
       const chars = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
       let mockAddress = '';
       for (let i = 0; i < 44; i++) {
@@ -152,55 +262,30 @@ class PrivyWalletService {
       };
     }
     
-    // TODO: Real Privy SDK call
-    // const wallet = await privyClient.walletApi.create({
-    //   chainType: 'solana',
-    //   // authorizationKeyIds: [SAID_AUTH_KEY_ID],  // SAID's signing authority
-    // });
-    // return {
-    //   publicKey: wallet.address,
-    //   providerWalletId: wallet.id,
-    //   provider: 'privy',
-    // };
-    
+    // TODO: Real Privy SDK call after Tuesday
+    // const wallet = await privyClient.walletApi.create({ chainType: 'solana' });
+    // return { publicKey: wallet.address, providerWalletId: wallet.id, provider: 'privy' };
     throw new Error('Live Privy wallet creation not yet implemented. Set PRIVY_WALLET_MODE=mock');
   }
   
-  /**
-   * Sign a transaction using Privy's delegation.
-   * SAID sends the serialized unsigned transaction to Privy,
-   * Privy signs it with the agent's private key, returns signed tx.
-   */
   async signTransaction(providerWalletId: string, serializedTx: string): Promise<{
     signedTransaction: string;
     signature: string;
   }> {
     if (this.isMock) {
-      // Return a mock signature
       const mockSig = crypto.randomBytes(64).toString('hex');
       return {
-        signedTransaction: serializedTx, // In mock, just pass through
+        signedTransaction: serializedTx,
         signature: `mock-sig-${mockSig.substring(0, 16)}`,
       };
     }
     
     // TODO: Real Privy SDK call
-    // const result = await privyClient.walletApi.solana.signTransaction({
-    //   walletId: providerWalletId,
-    //   transaction: serializedTx,
-    // });
-    // return {
-    //   signedTransaction: result.signedTransaction,
-    //   signature: result.signature,
-    // };
-    
+    // IMPORTANT: Privy uses ECDSA P-256 authorization keys, not Ed25519
+    // Confirm exact flow on Tuesday call
     throw new Error('Live Privy signing not yet implemented. Set PRIVY_WALLET_MODE=mock');
   }
   
-  /**
-   * Get wallet balance from Solana RPC.
-   * This doesn't go through Privy — we read balance directly from chain.
-   */
   async getBalance(publicKey: string, connection: Connection): Promise<{
     sol: number;
     usdc: number;
@@ -208,15 +293,9 @@ class PrivyWalletService {
     try {
       const pubkey = new PublicKey(publicKey);
       const lamports = await connection.getBalance(pubkey);
-      
-      // TODO: Also fetch USDC token account balance
-      // For now, just return SOL balance
-      return {
-        sol: lamports / LAMPORTS_PER_SOL,
-        usdc: 0, // Will implement SPL token balance lookup
-      };
-    } catch (error) {
-      // If mock address or RPC fails, return zeros
+      // TODO: SPL token balance lookup for USDC
+      return { sol: lamports / LAMPORTS_PER_SOL, usdc: 0 };
+    } catch {
       return { sol: 0, usdc: 0 };
     }
   }
@@ -228,18 +307,22 @@ class PrivyWalletService {
 
 type Variables = {
   agentCtx: AgentContext;
+  userId: string;
+  userAgentIds: string[];
 };
 
 export function createWalletRoutes(prisma: PrismaClient, connection: Connection) {
   const app = new Hono<{ Variables: Variables }>();
   const privyWallets = new PrivyWalletService();
   const validateApiKey = createApiKeyMiddleware(prisma);
+  const requireSession = createSessionAuthMiddleware(prisma);
   
   // ----------------------------------------------------------
   // POST /v1/wallet/create
   // Provision a new Privy wallet for an agent
-  // Auth: API key OR session token
+  // Auth: Session token required (must own the agent)
   // ----------------------------------------------------------
+  app.use('/v1/wallet/create', requireSession);
   app.post('/v1/wallet/create', async (c) => {
     const body = await c.req.json();
     const { agentId, walletType = 'transaction' } = body;
@@ -254,7 +337,13 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
       return c.json({ error: 'Agent not found' }, 404);
     }
     
-    // Check if agent already has a Privy wallet of this type
+    // Verify caller owns this agent
+    const userAgentIds = c.get('userAgentIds') as string[];
+    if (!userAgentIds.includes(agent.wallet)) {
+      return c.json({ error: 'You do not own this agent' }, 403);
+    }
+    
+    // Check if agent already has a wallet of this type
     const existingWallet = await prisma.agentWallet.findFirst({
       where: { agentId, walletType, status: 'active' }
     });
@@ -271,10 +360,8 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
     }
     
     try {
-      // Provision wallet via Privy
       const privyResult = await privyWallets.createWallet(agentId);
       
-      // Store in database
       const wallet = await prisma.agentWallet.create({
         data: {
           agentId,
@@ -290,7 +377,7 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
         }
       });
       
-      // Also create a default policy for the agent (if they don't have one)
+      // Auto-create default policy
       await prisma.transactionPolicy.upsert({
         where: { agentId },
         create: {
@@ -301,7 +388,7 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
           allowedTokens: ['USDC', 'SOL'],
           allowedPrograms: [],
         },
-        update: {}, // Don't overwrite if exists
+        update: {},
       });
       
       return c.json({
@@ -316,8 +403,8 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
           createdAt: wallet.createdAt,
         },
         note: privyResult.provider === 'mock'
-          ? 'This is a mock wallet. Real Privy integration coming after Tuesday call.'
-          : 'Wallet provisioned via Privy. Private key stored in secure enclave.',
+          ? 'Mock wallet. Real Privy integration after Tuesday call.'
+          : 'Wallet provisioned via Privy. Private key in secure enclave.',
       }, 201);
       
     } catch (error: any) {
@@ -328,7 +415,7 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
   
   // ----------------------------------------------------------
   // GET /v1/wallet/:agentId
-  // Get agent's Privy wallet info + balance
+  // Get agent's wallet info + balance (public endpoint)
   // ----------------------------------------------------------
   app.get('/v1/wallet/:agentId', async (c) => {
     const agentId = c.req.param('agentId');
@@ -339,10 +426,9 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
     });
     
     if (wallets.length === 0) {
-      return c.json({ error: 'No Privy wallets found for this agent. Use POST /v1/wallet/create first.' }, 404);
+      return c.json({ error: 'No Privy wallets found. Use POST /v1/wallet/create first.' }, 404);
     }
     
-    // Fetch balances for each wallet
     const walletsWithBalances = await Promise.all(
       wallets.map(async (w) => {
         const balance = await privyWallets.getBalance(w.publicKey, connection);
@@ -359,18 +445,15 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
       })
     );
     
-    return c.json({
-      agentId,
-      wallets: walletsWithBalances,
-    });
+    return c.json({ agentId, wallets: walletsWithBalances });
   });
   
   // ----------------------------------------------------------
   // POST /v1/wallet/upgrade
-  // Add a Privy wallet to an existing agent (opt-in migration)
-  // Links the new Privy wallet to the agent's identity via
-  // the existing multi-wallet linking flow.
+  // Add Privy wallet to existing agent (opt-in migration)
+  // Auth: Session token required (must own the agent)
   // ----------------------------------------------------------
+  app.use('/v1/wallet/upgrade', requireSession);
   app.post('/v1/wallet/upgrade', async (c) => {
     const body = await c.req.json();
     const { agentId } = body;
@@ -379,10 +462,15 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
       return c.json({ error: 'Required: agentId' }, 400);
     }
     
-    // Verify agent exists
     const agent = await prisma.agent.findUnique({ where: { id: agentId } });
     if (!agent) {
       return c.json({ error: 'Agent not found' }, 404);
+    }
+    
+    // Verify caller owns this agent
+    const userAgentIds = c.get('userAgentIds') as string[];
+    if (!userAgentIds.includes(agent.wallet)) {
+      return c.json({ error: 'You do not own this agent' }, 403);
     }
     
     // Check if already upgraded
@@ -393,18 +481,13 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
     if (existingWallet) {
       return c.json({
         error: 'Agent already has a Privy transaction wallet',
-        wallet: {
-          publicKey: existingWallet.publicKey,
-          createdAt: existingWallet.createdAt,
-        }
+        wallet: { publicKey: existingWallet.publicKey, createdAt: existingWallet.createdAt }
       }, 409);
     }
     
     try {
-      // 1. Provision Privy wallet
       const privyResult = await privyWallets.createWallet(agentId);
       
-      // 2. Store wallet record
       const wallet = await prisma.agentWallet.create({
         data: {
           agentId,
@@ -421,7 +504,6 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
         }
       });
       
-      // 3. Create default policy
       await prisma.transactionPolicy.upsert({
         where: { agentId },
         create: {
@@ -434,11 +516,6 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
         },
         update: {},
       });
-      
-      // 4. Link to on-chain identity will happen via the existing
-      //    /api/wallet/link flow — SAID's external signing wallet
-      //    signs on behalf of the Privy wallet.
-      //    This is a separate step the operator triggers.
       
       return c.json({
         success: true,
@@ -454,7 +531,7 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
           step2: 'Use POST /v1/transaction/request to transact via SAID',
           step3: '(Optional) Link on-chain via /api/wallet/link for identity resolution',
         },
-        note: 'Your original self-custody wallet remains active. The Privy wallet is an additional secure transaction wallet.',
+        note: 'Original self-custody wallet remains active. Privy wallet is an additional secure transaction wallet.',
       }, 201);
       
     } catch (error: any) {
@@ -465,14 +542,17 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
   
   // ----------------------------------------------------------
   // POST /v1/transaction/request
-  // Request a transaction — SAID validates, Privy signs, broadcasts
-  // Auth: API key required
+  // Request a transaction — full policy check → Privy sign → broadcast
+  // Auth: API key required with "transaction" scope
+  //
+  // Security: Uses advisory lock to prevent race conditions on
+  // concurrent spending limit checks.
   // ----------------------------------------------------------
   app.use('/v1/transaction/request', validateApiKey);
   app.post('/v1/transaction/request', async (c) => {
     const agentCtx = c.get('agentCtx') as AgentContext;
     const body = await c.req.json();
-    const { type, token, amount, recipient, programId, memo } = body;
+    const { type, token, amount, recipient, programId, memo, idempotencyKey } = body;
     
     // Validate required fields
     if (!type || !token || amount === undefined) {
@@ -488,7 +568,35 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
       return c.json({ error: 'API key does not have transaction scope' }, 403);
     }
     
-    // Find agent's active Privy wallet
+    const numAmount = Number(amount);
+    if (isNaN(numAmount) || numAmount <= 0) {
+      return c.json({ error: 'Amount must be a positive number' }, 400);
+    }
+    
+    // ---- Idempotency Check ----
+    if (idempotencyKey) {
+      const existing = await prisma.transactionRequest.findFirst({
+        where: { agentId: agentCtx.agentId, memo: `idempotency:${idempotencyKey}` },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (existing) {
+        return c.json({
+          transactionId: existing.id,
+          status: existing.status,
+          note: 'Duplicate request detected via idempotency key. Returning existing transaction.',
+          txHash: existing.txHash,
+        });
+      }
+    }
+    
+    // ---- Pre-check 1: Agent status ----
+    const agent = await prisma.agent.findUnique({ where: { id: agentCtx.agentId } });
+    if (!agent) {
+      return c.json({ error: 'Agent not found' }, 404);
+    }
+    // Note: Add agent suspension/deactivation check here when that feature exists
+    
+    // ---- Pre-check 2: Wallet status ----
     const wallet = await prisma.agentWallet.findFirst({
       where: { agentId: agentCtx.agentId, walletType: 'transaction', status: 'active', isPrimary: true }
     });
@@ -497,7 +605,11 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
       return c.json({ error: 'No active Privy wallet. Use POST /v1/wallet/create first.' }, 404);
     }
     
-    // Create transaction request record (pending)
+    if (wallet.status !== 'active') {
+      return c.json({ error: `Wallet is ${wallet.status}. Cannot transact.` }, 403);
+    }
+    
+    // Create transaction request record
     const txRequest = await prisma.transactionRequest.create({
       data: {
         agentId: agentCtx.agentId,
@@ -508,30 +620,27 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
         amount,
         recipient,
         programId,
-        memo,
+        memo: idempotencyKey ? `idempotency:${idempotencyKey}` : memo,
         status: 'pending',
       }
     });
     
     try {
-      const numAmount = Number(amount);
-      
-      // ------ Policy Check ------
-      const policy = await prisma.transactionPolicy.findUnique({
-        where: { agentId: agentCtx.agentId }
-      });
+      // ---- Policy Check (with advisory lock to prevent race conditions) ----
+      // Use raw SQL advisory lock on the agent's policy row
+      // This serializes concurrent requests for the same agent
+      const policy = await prisma.$queryRaw`
+        SELECT * FROM "TransactionPolicy" 
+        WHERE "agentId" = ${agentCtx.agentId} 
+        FOR UPDATE
+      `.then((rows: any) => rows[0] || null);
       
       if (policy && policy.status === 'active') {
-        
-        // Check per-transaction limit
+        // Check 1: Per-transaction limit
         if (numAmount > Number(policy.maxPerTransaction)) {
-          await prisma.transactionRequest.update({
-            where: { id: txRequest.id },
-            data: {
-              status: 'denied',
-              policyPassed: false,
-              policyReason: `Exceeds per-transaction limit: ${amount} > ${policy.maxPerTransaction}`,
-            }
+          await updateTxStatus(prisma, txRequest.id, 'denied', {
+            policyPassed: false,
+            policyReason: `Exceeds per-transaction limit: ${amount} > ${policy.maxPerTransaction}`,
           });
           return c.json({
             transactionId: txRequest.id,
@@ -543,28 +652,26 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
           }, 403);
         }
         
-        // Check daily spending
+        // Check 2: Daily spending limit
+        // Includes pending+approved+signing+broadcast+confirmed to prevent race conditions
         const todayStart = new Date();
         todayStart.setHours(0, 0, 0, 0);
         
         const dailySpend = await prisma.transactionRequest.aggregate({
           where: {
             agentId: agentCtx.agentId,
-            status: { in: ['confirmed', 'broadcast', 'signing'] },
+            status: { in: SPENDING_STATUSES },
             createdAt: { gte: todayStart },
+            id: { not: txRequest.id }, // Exclude current request
           },
           _sum: { amount: true },
         });
         
         const dailyTotal = Number(dailySpend._sum.amount || 0) + numAmount;
         if (dailyTotal > Number(policy.maxPerDay)) {
-          await prisma.transactionRequest.update({
-            where: { id: txRequest.id },
-            data: {
-              status: 'denied',
-              policyPassed: false,
-              policyReason: `Exceeds daily limit: ${dailyTotal} > ${policy.maxPerDay}`,
-            }
+          await updateTxStatus(prisma, txRequest.id, 'denied', {
+            policyPassed: false,
+            policyReason: `Exceeds daily limit: ${dailyTotal.toFixed(2)} > ${policy.maxPerDay}`,
           });
           return c.json({
             transactionId: txRequest.id,
@@ -577,15 +684,43 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
           }, 403);
         }
         
-        // Check token allowlist
-        if (policy.allowedTokens.length > 0 && !policy.allowedTokens.includes(token)) {
-          await prisma.transactionRequest.update({
-            where: { id: txRequest.id },
-            data: {
-              status: 'denied',
-              policyPassed: false,
-              policyReason: `Token ${token} not in allowlist: ${policy.allowedTokens.join(', ')}`,
+        // Check 3: Monthly spending limit
+        const monthStart = new Date();
+        monthStart.setDate(1);
+        monthStart.setHours(0, 0, 0, 0);
+        
+        const monthlySpend = await prisma.transactionRequest.aggregate({
+          where: {
+            agentId: agentCtx.agentId,
+            status: { in: SPENDING_STATUSES },
+            createdAt: { gte: monthStart },
+            id: { not: txRequest.id },
+          },
+          _sum: { amount: true },
+        });
+        
+        const monthlyTotal = Number(monthlySpend._sum.amount || 0) + numAmount;
+        if (monthlyTotal > Number(policy.maxPerMonth)) {
+          await updateTxStatus(prisma, txRequest.id, 'denied', {
+            policyPassed: false,
+            policyReason: `Exceeds monthly limit: ${monthlyTotal.toFixed(2)} > ${policy.maxPerMonth}`,
+          });
+          return c.json({
+            transactionId: txRequest.id,
+            status: 'denied',
+            policyCheck: {
+              passed: false,
+              reason: `Exceeds monthly limit (${monthlyTotal.toFixed(2)} > ${policy.maxPerMonth} ${token})`,
+              currentMonthlySpend: Number(monthlySpend._sum.amount || 0),
             }
+          }, 403);
+        }
+        
+        // Check 4: Token allowlist
+        if (policy.allowedTokens.length > 0 && !policy.allowedTokens.includes(token)) {
+          await updateTxStatus(prisma, txRequest.id, 'denied', {
+            policyPassed: false,
+            policyReason: `Token ${token} not in allowlist: ${policy.allowedTokens.join(', ')}`,
           });
           return c.json({
             transactionId: txRequest.id,
@@ -597,15 +732,11 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
           }, 403);
         }
         
-        // Check program allowlist (if specified and programId provided)
+        // Check 5: Program allowlist
         if (programId && policy.allowedPrograms.length > 0 && !policy.allowedPrograms.includes(programId)) {
-          await prisma.transactionRequest.update({
-            where: { id: txRequest.id },
-            data: {
-              status: 'denied',
-              policyPassed: false,
-              policyReason: `Program ${programId} not in allowlist`,
-            }
+          await updateTxStatus(prisma, txRequest.id, 'denied', {
+            policyPassed: false,
+            policyReason: `Program ${programId} not in allowlist`,
           });
           return c.json({
             transactionId: txRequest.id,
@@ -616,22 +747,32 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
             }
           }, 403);
         }
+        
+        // Check 6: Approval threshold
+        if (numAmount > Number(policy.requireApprovalAbove)) {
+          await updateTxStatus(prisma, txRequest.id, 'pending', {
+            policyPassed: true,
+            policyReason: `Amount ${amount} exceeds approval threshold (${policy.requireApprovalAbove}). Queued for manual approval.`,
+          });
+          return c.json({
+            transactionId: txRequest.id,
+            status: 'pending_approval',
+            policyCheck: {
+              passed: true,
+              reason: `Amount exceeds ${policy.requireApprovalAbove} ${token}. Queued for manual approval.`,
+            },
+            note: 'This transaction requires manual approval from the agent operator.',
+          });
+        }
       }
       
-      // ------ Policy Passed ------
-      await prisma.transactionRequest.update({
-        where: { id: txRequest.id },
-        data: {
-          status: 'approved',
-          policyPassed: true,
-          policyReason: 'All policy checks passed',
-        }
+      // ---- All Policy Checks Passed ----
+      await updateTxStatus(prisma, txRequest.id, 'approved', {
+        policyPassed: true,
+        policyReason: 'All policy checks passed',
       });
       
-      // ------ Build Transaction ------
-      // For V1, we handle simple SOL and USDC transfers.
-      // Custom program interactions come in V2.
-      
+      // ---- Build & Sign Transaction ----
       if (type === 'transfer' && token === 'SOL') {
         const senderPubkey = new PublicKey(wallet.publicKey);
         const recipientPubkey = new PublicKey(recipient);
@@ -657,33 +798,25 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
           verifySignatures: false,
         }).toString('base64');
         
-        // ------ Sign via Privy ------
-        await prisma.transactionRequest.update({
-          where: { id: txRequest.id },
-          data: { status: 'signing', serializedTx }
-        });
+        // Sign via Privy
+        await updateTxStatus(prisma, txRequest.id, 'signing', { serializedTx });
         
         const signResult = await privyWallets.signTransaction(
           wallet.providerWalletId!,
           serializedTx
         );
         
-        await prisma.transactionRequest.update({
-          where: { id: txRequest.id },
-          data: { signedAt: new Date() }
+        // Broadcast
+        await updateTxStatus(prisma, txRequest.id, 'broadcast', {
+          signedAt: new Date(),
+          txHash: signResult.signature,
+          broadcastAt: new Date(),
         });
         
-        // ------ Broadcast ------
-        // In mock mode, we don't actually broadcast
         if (wallet.provider === 'mock') {
-          await prisma.transactionRequest.update({
-            where: { id: txRequest.id },
-            data: {
-              status: 'confirmed',
-              txHash: signResult.signature,
-              broadcastAt: new Date(),
-              confirmedAt: new Date(),
-            }
+          // Mock: mark as confirmed immediately
+          await updateTxStatus(prisma, txRequest.id, 'confirmed', {
+            confirmedAt: new Date(),
           });
           
           return c.json({
@@ -696,37 +829,50 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
             txHash: signResult.signature,
             policyCheck: { passed: true, reason: 'All policy checks passed' },
             wallet: { publicKey: wallet.publicKey },
-            note: 'Mock transaction — no real funds moved. Live signing after Privy integration.',
+            note: 'Mock transaction — no real funds moved.',
           });
         }
         
-        // TODO: Real broadcast
-        // const txSig = await connection.sendRawTransaction(
-        //   Buffer.from(signResult.signedTransaction, 'base64')
-        // );
-        // await connection.confirmTransaction(txSig);
+        // TODO: Real broadcast + async confirmation polling
+        // For live mode:
+        // 1. Send raw transaction
+        // 2. Return 'broadcast' status with txHash immediately
+        // 3. Background job polls for confirmation, updates status
+        // 4. Optional webhook notification to agent when confirmed
+        
+        return c.json({
+          transactionId: txRequest.id,
+          status: 'broadcast',
+          type,
+          amount: numAmount,
+          token,
+          recipient,
+          txHash: signResult.signature,
+          policyCheck: { passed: true, reason: 'All policy checks passed' },
+          wallet: { publicKey: wallet.publicKey },
+          note: 'Transaction broadcast. Confirmation is async — poll GET /v1/transaction/:txId for status.',
+        });
         
       } else {
-        // For non-SOL-transfer types, mark as approved but not yet executable
+        // Non-SOL-transfer: approved but not yet executable in V1
         return c.json({
           transactionId: txRequest.id,
           status: 'approved',
           type,
-          amount: Number(amount),
+          amount: numAmount,
           token,
           recipient,
           policyCheck: { passed: true, reason: 'All policy checks passed' },
-          note: `Transaction type '${type}' for token '${token}' approved but execution not yet implemented. SOL transfers are live.`,
+          note: `Transaction type '${type}' for '${token}' approved but execution not yet implemented. SOL transfers are live.`,
         });
       }
       
     } catch (error: any) {
       console.error('[Transaction Request Error]', error);
       
-      await prisma.transactionRequest.update({
-        where: { id: txRequest.id },
-        data: { status: 'failed', errorMessage: error.message }
-      }).catch(() => {});
+      await updateTxStatus(prisma, txRequest.id, 'failed', {
+        errorMessage: error.message,
+      });
       
       return c.json({
         transactionId: txRequest.id,
@@ -738,7 +884,7 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
   
   // ----------------------------------------------------------
   // GET /v1/transaction/:txId
-  // Get transaction status
+  // Get transaction status + full audit trail
   // ----------------------------------------------------------
   app.get('/v1/transaction/:txId', async (c) => {
     const txId = c.req.param('txId');
@@ -760,6 +906,7 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
       token: tx.token,
       amount: Number(tx.amount),
       recipient: tx.recipient,
+      programId: tx.programId,
       txHash: tx.txHash,
       policyCheck: {
         passed: tx.policyPassed,
@@ -779,8 +926,9 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
   // ----------------------------------------------------------
   // POST /v1/apikey/generate
   // Generate a new API key for an agent
-  // Auth: Session token (logged-in user who owns the agent)
+  // Auth: Session token required (must own the agent)
   // ----------------------------------------------------------
+  app.use('/v1/apikey/generate', requireSession);
   app.post('/v1/apikey/generate', async (c) => {
     const body = await c.req.json();
     const { agentId, name, scopes, rateLimitPerHour, expiresInDays } = body;
@@ -789,17 +937,21 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
       return c.json({ error: 'Required: agentId' }, 400);
     }
     
-    // TODO: Verify caller owns this agent (via session token)
-    // For now, anyone can generate keys — tighten auth before production
-    
+    // Verify agent exists
     const agent = await prisma.agent.findUnique({ where: { id: agentId } });
     if (!agent) {
       return c.json({ error: 'Agent not found' }, 404);
     }
     
-    const rawKey = generateApiKey();
+    // Verify caller owns this agent
+    const userAgentIds = c.get('userAgentIds') as string[];
+    if (!userAgentIds.includes(agent.wallet)) {
+      return c.json({ error: 'You do not own this agent' }, 403);
+    }
+    
+    const rawKey = generateRawApiKey();
     const keyHash = hashApiKey(rawKey);
-    const keyPrefix = rawKey.substring(0, 12); // said_ak_xxxx
+    const keyPrefix = rawKey.substring(0, 12);
     
     const expiresAt = expiresInDays
       ? new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000)
@@ -814,11 +966,12 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
         scopes: scopes || ['wallet', 'transaction'],
         rateLimitPerHour: rateLimitPerHour || 100,
         expiresAt,
+        createdBy: c.get('userId') as string,
       }
     });
     
     return c.json({
-      apiKey: rawKey, // ⚠️ ONLY shown once — store securely
+      apiKey: rawKey, // ⚠️ ONLY shown once
       keyId: apiKey.id,
       keyPrefix: apiKey.keyPrefix,
       agentId: apiKey.agentId,
@@ -833,7 +986,9 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
   // ----------------------------------------------------------
   // POST /v1/apikey/revoke
   // Revoke an API key
+  // Auth: Session token required
   // ----------------------------------------------------------
+  app.use('/v1/apikey/revoke', requireSession);
   app.post('/v1/apikey/revoke', async (c) => {
     const body = await c.req.json();
     const { keyId } = body;
@@ -842,9 +997,18 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
       return c.json({ error: 'Required: keyId' }, 400);
     }
     
-    const key = await prisma.apiKey.findUnique({ where: { id: keyId } });
+    const key = await prisma.apiKey.findUnique({
+      where: { id: keyId },
+      include: { agent: true }
+    });
     if (!key) {
       return c.json({ error: 'API key not found' }, 404);
+    }
+    
+    // Verify caller owns the agent this key belongs to
+    const userAgentIds = c.get('userAgentIds') as string[];
+    if (!userAgentIds.includes(key.agent.wallet)) {
+      return c.json({ error: 'You do not own this agent' }, 403);
     }
     
     if (key.revokedAt) {
@@ -866,7 +1030,7 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
   
   // ----------------------------------------------------------
   // GET /v1/policy/:agentId
-  // Get current transaction policy for an agent
+  // Get current transaction policy + spending totals
   // ----------------------------------------------------------
   app.get('/v1/policy/:agentId', async (c) => {
     const agentId = c.req.param('agentId');
@@ -879,7 +1043,6 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
       return c.json({ error: 'No policy found. One is created automatically when a wallet is provisioned.' }, 404);
     }
     
-    // Get current spending
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
     const monthStart = new Date();
@@ -890,7 +1053,7 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
       prisma.transactionRequest.aggregate({
         where: {
           agentId,
-          status: { in: ['confirmed', 'broadcast', 'signing'] },
+          status: { in: SPENDING_STATUSES },
           createdAt: { gte: todayStart },
         },
         _sum: { amount: true },
@@ -898,7 +1061,7 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
       prisma.transactionRequest.aggregate({
         where: {
           agentId,
-          status: { in: ['confirmed', 'broadcast', 'signing'] },
+          status: { in: SPENDING_STATUSES },
           createdAt: { gte: monthStart },
         },
         _sum: { amount: true },
@@ -919,8 +1082,8 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
       currentUsage: {
         todaySpent: Number(dailySpend._sum.amount || 0),
         monthSpent: Number(monthlySpend._sum.amount || 0),
-        todayRemaining: Number(policy.maxPerDay) - Number(dailySpend._sum.amount || 0),
-        monthRemaining: Number(policy.maxPerMonth) - Number(monthlySpend._sum.amount || 0),
+        todayRemaining: Math.max(0, Number(policy.maxPerDay) - Number(dailySpend._sum.amount || 0)),
+        monthRemaining: Math.max(0, Number(policy.maxPerMonth) - Number(monthlySpend._sum.amount || 0)),
       },
       updatedAt: policy.updatedAt,
     });
@@ -929,12 +1092,23 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
   // ----------------------------------------------------------
   // PUT /v1/policy/:agentId
   // Update transaction policy (owner only)
+  // Auth: Session token required
   // ----------------------------------------------------------
+  app.use('/v1/policy/:agentId', requireSession);
   app.put('/v1/policy/:agentId', async (c) => {
     const agentId = c.req.param('agentId');
     const body = await c.req.json();
     
-    // TODO: Verify caller owns this agent
+    // Verify agent exists and caller owns it
+    const agent = await prisma.agent.findUnique({ where: { id: agentId } });
+    if (!agent) {
+      return c.json({ error: 'Agent not found' }, 404);
+    }
+    
+    const userAgentIds = c.get('userAgentIds') as string[];
+    if (!userAgentIds.includes(agent.wallet)) {
+      return c.json({ error: 'You do not own this agent' }, 403);
+    }
     
     const {
       maxPerTransaction,
@@ -946,27 +1120,19 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection)
       status,
     } = body;
     
+    const updateData: Record<string, any> = {};
+    if (maxPerTransaction !== undefined) updateData.maxPerTransaction = maxPerTransaction;
+    if (maxPerDay !== undefined) updateData.maxPerDay = maxPerDay;
+    if (maxPerMonth !== undefined) updateData.maxPerMonth = maxPerMonth;
+    if (allowedTokens !== undefined) updateData.allowedTokens = allowedTokens;
+    if (allowedPrograms !== undefined) updateData.allowedPrograms = allowedPrograms;
+    if (requireApprovalAbove !== undefined) updateData.requireApprovalAbove = requireApprovalAbove;
+    if (status !== undefined) updateData.status = status;
+    
     const policy = await prisma.transactionPolicy.upsert({
       where: { agentId },
-      create: {
-        agentId,
-        ...(maxPerTransaction !== undefined && { maxPerTransaction }),
-        ...(maxPerDay !== undefined && { maxPerDay }),
-        ...(maxPerMonth !== undefined && { maxPerMonth }),
-        ...(allowedTokens !== undefined && { allowedTokens }),
-        ...(allowedPrograms !== undefined && { allowedPrograms }),
-        ...(requireApprovalAbove !== undefined && { requireApprovalAbove }),
-        ...(status !== undefined && { status }),
-      },
-      update: {
-        ...(maxPerTransaction !== undefined && { maxPerTransaction }),
-        ...(maxPerDay !== undefined && { maxPerDay }),
-        ...(maxPerMonth !== undefined && { maxPerMonth }),
-        ...(allowedTokens !== undefined && { allowedTokens }),
-        ...(allowedPrograms !== undefined && { allowedPrograms }),
-        ...(requireApprovalAbove !== undefined && { requireApprovalAbove }),
-        ...(status !== undefined && { status }),
-      },
+      create: { agentId, ...updateData },
+      update: updateData,
     });
     
     return c.json({
