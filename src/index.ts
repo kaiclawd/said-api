@@ -31,6 +31,7 @@ import { PrivyClient } from '@privy-io/node';
 
 import a2aRoutes from './a2a-endpoints.js';
 import crossChainRoutes from './cross-chain-endpoints.js';
+import { createWalletRoutes } from './wallet-endpoints.js';
 import { setupWebSocket } from './ws-handler.js';
 import { createX402Middleware, getFreeTierInfo, CHAINS, FREE_MESSAGES_PER_DAY, MESSAGE_PRICE, bodyCache } from './x402-config.js';
 // Verify a Solana wallet signature
@@ -5956,6 +5957,12 @@ console.log(`✅ Supported payment chains: ${Object.keys(CHAINS).join(', ')}`);
 
 app.route('/xchain', crossChainRoutes);
 console.log('✅ Cross-Chain Communication endpoints mounted');
+
+// Mount Delegated Signing Authority (Privy wallet) routes
+const walletRoutes = createWalletRoutes(prisma, connection);
+app.route('/', walletRoutes);
+console.log('✅ Delegated Signing Authority endpoints mounted (/v1/wallet/*, /v1/transaction/*, /v1/apikey/*, /v1/policy/*)');
+
 setInterval(syncAgentsFromChain, 5 * 60 * 1000);
 
 const server = serve({ fetch: app.fetch, port }, (info) => {
