@@ -3419,6 +3419,128 @@ app.get('/api/stats', async (c) => {
  * Quick verification endpoint for integrating platforms.
  * Returns identity, reputation, trust tier, and useful URLs.
  */
+/**
+ * Compute detailed trust score with component breakdown
+ * Components: identity, activity, economic, ecosystem, longevity (+ fairscale when available)
+ */
+function computeTrustScore(agent: any): {
+  score: number;
+  tier: string;
+  badges: string[];
+  sources: string[];
+  identity: number;
+  activity: number;
+  economic: number;
+  ecosystem: number;
+  longevity: number;
+  fairscale: number;
+  computedAt: string;
+} {
+  const now = new Date();
+  const registeredAt = new Date(agent.registeredAt);
+  const ageDays = Math.floor((now.getTime() - registeredAt.getTime()) / (1000 * 60 * 60 * 24));
+  
+  // Identity component (0-10): verification + profile completeness
+  let identityScore = 0;
+  if (agent.isVerified) identityScore += 4;
+  if (agent.name) identityScore += 1;
+  if (agent.description) identityScore += 1;
+  if (agent.twitter) identityScore += 1;
+  if (agent.website) identityScore += 1;
+  if (agent.image) identityScore += 1;
+  if (agent.layer2Verified) identityScore += 1;
+  identityScore = Math.min(10, identityScore);
+  
+  // Activity component (0-10): feedback count + activity count
+  const feedbackCount = agent._count?.feedbackReceived || agent.feedbackCount || 0;
+  const activityCount = agent.activityCount || 0;
+  let activityScore = 0;
+  if (feedbackCount >= 10) activityScore += 3;
+  else if (feedbackCount >= 5) activityScore += 2;
+  else if (feedbackCount >= 1) activityScore += 1;
+  if (activityCount >= 50) activityScore += 3;
+  else if (activityCount >= 20) activityScore += 2;
+  else if (activityCount >= 5) activityScore += 1;
+  if (agent.lastActiveAt) {
+    const lastActive = new Date(agent.lastActiveAt);
+    const daysSinceActive = Math.floor((now.getTime() - lastActive.getTime()) / (1000 * 60 * 60 * 24));
+    if (daysSinceActive <= 7) activityScore += 2;
+    else if (daysSinceActive <= 30) activityScore += 1;
+  }
+  activityScore = Math.min(10, activityScore);
+  
+  // Economic component (0-10): reputation score + verification
+  let economicScore = 0;
+  const repScore = agent.reputationScore || 0;
+  if (repScore >= 80) economicScore += 4;
+  else if (repScore >= 60) economicScore += 3;
+  else if (repScore >= 40) economicScore += 2;
+  else if (repScore >= 20) economicScore += 1;
+  if (agent.isVerified) economicScore += 3;
+  if (agent.passportMint) economicScore += 3;
+  economicScore = Math.min(10, economicScore);
+  
+  // Ecosystem component (0-10): endpoints + skills + service types
+  let ecosystemScore = 0;
+  if (agent.mcpEndpoint) ecosystemScore += 2;
+  if (agent.a2aEndpoint) ecosystemScore += 2;
+  if (agent.skills && agent.skills.length > 0) ecosystemScore += Math.min(3, agent.skills.length);
+  if (agent.serviceTypes && agent.serviceTypes.length > 0) ecosystemScore += Math.min(3, agent.serviceTypes.length);
+  ecosystemScore = Math.min(10, ecosystemScore);
+  
+  // Longevity component (0-10): age of account
+  let longevityScore = 0;
+  if (ageDays >= 90) longevityScore = 10;
+  else if (ageDays >= 60) longevityScore = 8;
+  else if (ageDays >= 30) longevityScore = 6;
+  else if (ageDays >= 14) longevityScore = 4;
+  else if (ageDays >= 7) longevityScore = 2;
+  else longevityScore = 1;
+  
+  // Fairscale component (0-10): placeholder for external reputation integration
+  // TODO: Integrate with FairScale API when available
+  const fairscaleScore = 0;
+  
+  // Calculate total score (0-100)
+  const totalScore = Math.round(
+    (identityScore * 3 + activityScore * 2 + economicScore * 2 + ecosystemScore * 1.5 + longevityScore * 1 + fairscaleScore * 0.5)
+  );
+  
+  // Determine tier
+  let tier = 'bronze';
+  if (totalScore >= 70) tier = 'gold';
+  else if (totalScore >= 50) tier = 'silver';
+  else if (totalScore >= 30) tier = 'bronze';
+  else tier = 'unranked';
+  
+  // Collect badges
+  const badges: string[] = [];
+  if (agent.isVerified) badges.push('verified');
+  if (agent.passportMint) badges.push('passport');
+  if (agent.layer2Verified) badges.push('l2_verified');
+  if (repScore >= 80 && feedbackCount >= 10) badges.push('trusted');
+  if (ageDays >= 30 && activityCount >= 50) badges.push('active');
+  if (feedbackCount === 0 && ageDays < 7) badges.push('new');
+  
+  // Sources
+  const sources = ['said'];
+  if (fairscaleScore > 0) sources.push('fairscale');
+  
+  return {
+    score: Math.min(100, totalScore),
+    tier,
+    badges,
+    sources,
+    identity: identityScore,
+    activity: activityScore,
+    economic: economicScore,
+    ecosystem: ecosystemScore,
+    longevity: longevityScore,
+    fairscale: fairscaleScore,
+    computedAt: new Date().toISOString(),
+  };
+}
+
 app.get('/api/verify/:wallet', async (c) => {
   const wallet = c.req.param('wallet');
   const include = c.req.query('include'); // ?include=payments
@@ -3446,6 +3568,9 @@ app.get('/api/verify/:wallet', async (c) => {
       : agent.isVerified || agent.reputationScore >= 40
         ? 'medium'
         : 'low';
+  
+  // Compute detailed trust score
+  const trustScore = computeTrustScore(agent);
 
   return c.json({
     registered: true,
@@ -3464,6 +3589,7 @@ app.get('/api/verify/:wallet', async (c) => {
       feedbackCount: agent._count.feedbackReceived,
       trustTier,
     },
+    trustScore,
     endpoints: {
       mcp: agent.mcpEndpoint ?? null,
       a2a: agent.a2aEndpoint ?? null,
