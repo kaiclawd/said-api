@@ -31,6 +31,7 @@ import { PrivyClient } from '@privy-io/node';
 
 import a2aRoutes from './a2a-endpoints.js';
 import crossChainRoutes from './cross-chain-endpoints.js';
+import { createWalletRoutes } from './wallet-endpoints.js';
 import { setupWebSocket } from './ws-handler.js';
 import { createX402Middleware, getFreeTierInfo, CHAINS, FREE_MESSAGES_PER_DAY, MESSAGE_PRICE, bodyCache } from './x402-config.js';
 // Verify a Solana wallet signature
@@ -53,6 +54,9 @@ function getFeedbackMessage(fromWallet: string, toWallet: string, score: number,
 
 config();
 
+// Singleton PrismaClient
+// NOTE: Set connection_limit in DATABASE_URL on Railway directly, e.g.:
+// postgresql://user:pass@host:5432/railway?connection_limit=10
 const prisma = new PrismaClient();
 export { prisma as sharedPrisma };
 const app = new Hono();
@@ -6151,6 +6155,11 @@ console.log('✅ Cross-Chain Communication endpoints mounted');
 app.route('/api/score', createScoreRoutes(prisma, connection));
 initScoreWorker(prisma, connection);
 console.log('✅ Trust Score engine mounted (GET /api/score/:wallet)');
+
+// Mount Delegated Signing Authority (Privy wallet) routes
+const walletRoutes = createWalletRoutes(prisma, connection);
+app.route('/', walletRoutes);
+console.log('✅ Delegated Signing Authority endpoints mounted (/v1/wallet/*, /v1/transaction/*, /v1/apikey/*, /v1/policy/*)');
 
 setInterval(syncAgentsFromChain, 5 * 60 * 1000);
 
