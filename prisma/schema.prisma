@@ -70,9 +70,14 @@ model Agent {
   apiKeys          ApiKey[]
   transactionPolicy TransactionPolicy?
 
+  // Partner platform (SeekerClaw, etc.)
+  platformId       String?          // null for self-hosted/organic agents
+  nftAddress       String?          // Metaplex Core asset address
+
   @@index([name])
   @@index([reputationScore])
   @@index([isVerified])
+  @@index([platformId])
 }
 
 model Feedback {
@@ -482,6 +487,21 @@ model ApiKey {
   @@index([agentId])
   @@index([keyHash])
   @@index([keyPrefix])
+}
+
+model MonthlyUsage {
+  id              String   @id @default(cuid())
+  platformId      String
+  month           String   // "2026-04"
+  signatures      Int      @default(0)
+  feesCollected   Float    @default(0)  // SOL
+  agentsCreated   Int      @default(0)
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([platformId, month])
+  @@index([platformId])
 }
 
 model TransactionPolicy {

@@ -3131,6 +3131,622 @@ app.post('/api/platforms/spawnr/webhooks', async (c) => {
   }
 });
 
+// ============ SEEKERCLAW PLATFORM INTEGRATION ============
+
+/**
+ * POST /api/platforms/seekerclaw/provision
+ * Single-call agent provisioning for SeekerClaw devices.
+ *
+ * Unlike Spawnr/ClawPump (2-step: build tx → partner signs → confirm),
+ * SeekerClaw agents get Privy custodial wallets — WE own the keys.
+ * So this is a single endpoint that does everything:
+ *   1. Create Privy wallet
+ *   2. Fund agent wallet from sponsor
+ *   3. Register on SAID program (sponsor_register)
+ *   4. Verify on SAID program (get_verified → 0.01 SOL to treasury)
+ *   5. Store in DB
+ *   6. Return wallet address + agent details
+ *
+ * Authentication: X-Platform-Key header (SeekerClaw's API key)
+ * 
+ * Note: Metaplex NFT minting is Phase 2 (separate tx due to UMI/web3.js boundary).
+ */
+app.post('/api/platforms/seekerclaw/provision', async (c) => {
+  // Validate SeekerClaw API key
+  const apiKey = c.req.header('X-Platform-Key');
+  const expectedKey = process.env.SEEKERCLAW_API_KEY;
+
+  if (!expectedKey || !apiKey || apiKey !== expectedKey) {
+    return c.json({ error: 'Invalid API key' }, 401);
+  }
+
+  const body = await c.req.json();
+  const { agent_name, metadata } = body;
+
+  if (!agent_name) {
+    return c.json({ error: 'Required: agent_name' }, 400);
+  }
+
+  // Check for idempotency — if device_id provided, check if already provisioned
+  if (metadata?.device_id) {
+    const existing = await prisma.agent.findFirst({
+      where: {
+        registrationSource: 'seekerclaw',
+        description: { contains: metadata.device_id },
+      },
+      include: { agentWallets: true },
+    });
+
+    if (existing && existing.agentWallets.length > 0) {
+      return c.json({
+        success: true,
+        already_provisioned: true,
+        agent: {
+          id: existing.id,
+          wallet: existing.wallet,
+          pda: existing.pda,
+          name: existing.name,
+          status: existing.isVerified ? 'verified' : 'registered',
+          profile: `https://www.saidprotocol.com/agent.html?wallet=${existing.wallet}`,
+          badge: `https://api.saidprotocol.com/api/badge/${existing.wallet}.svg`,
+        },
+      });
+    }
+  }
+
+  // Check sponsor wallet balance before starting
+  const sponsorKey = process.env['SPAWNR_SPONSOR_PRIVATE_KEY'];
+  if (!sponsorKey) {
+    return c.json({ error: 'Sponsor wallet not configured', support: 'contact@saidprotocol.com' }, 500);
+  }
+
+  const sponsorKeypair = Keypair.fromSecretKey(bs58.decode(sponsorKey));
+  const sponsorBalance = await connection.getBalance(sponsorKeypair.publicKey);
+  const REQUIRED_SPONSOR_BALANCE = 0.02 * LAMPORTS_PER_SOL; // 0.015 fund + buffer
+
+  if (sponsorBalance < REQUIRED_SPONSOR_BALANCE) {
+    return c.json({
+      error: 'Sponsor wallet balance too low to provision',
+      code: 'INSUFFICIENT_FUNDS',
+      sponsor_balance_sol: sponsorBalance / LAMPORTS_PER_SOL,
+      required_sol: REQUIRED_SPONSOR_BALANCE / LAMPORTS_PER_SOL,
+    }, 402);
+  }
+
+  try {
+    // ── Step 1: Create Privy wallet ──
+    console.log(`[SeekerClaw] Creating Privy wallet for agent "${agent_name}"`);
+
+    let agentPubkey: PublicKey;
+    let privyWalletId: string;
+    let walletProvider: string;
+
+    const isLiveMode = process.env.PRIVY_WALLET_MODE === 'live';
+    if (isLiveMode) {
+      const wallet = await privyClient.walletApi.create({ chainType: 'solana' });
+      agentPubkey = new PublicKey(wallet.address);
+      privyWalletId = wallet.id;
+      walletProvider = 'privy';
+    } else {
+      // Mock mode for testing
+      const mockKeypair = Keypair.generate();
+      agentPubkey = mockKeypair.publicKey;
+      privyWalletId = `mock-${mockKeypair.publicKey.toBase58().substring(0, 8)}`;
+      walletProvider = 'mock';
+    }
+
+    const walletAddress = agentPubkey.toBase58();
+    console.log(`[SeekerClaw] Wallet created: ${walletAddress} (${walletProvider})`);
+
+    // ── Step 2: Derive PDA ──
+    const [pda] = PublicKey.findProgramAddressSync(
+      [Buffer.from('agent'), agentPubkey.toBuffer()],
+      SAID_PROGRAM_ID
+    );
+
+    // ── Step 3: Store agent card (needed for metadata_uri) ──
+    const metadataUri = `https://api.saidprotocol.com/api/cards/${walletAddress}.json`;
+    const card = {
+      name: agent_name,
+      description: `${agent_name} - SeekerClaw AI Agent`,
+      wallet: walletAddress,
+      capabilities: metadata?.capabilities || ['payments', 'x402'],
+      platform: 'seekerclaw',
+      verified: true,
+      registeredAt: new Date().toISOString(),
+      device_id: metadata?.device_id,
+    };
+
+    await prisma.agentCard.upsert({
+      where: { wallet: walletAddress },
+      create: { wallet: walletAddress, cardJson: JSON.stringify(card) },
+      update: { cardJson: JSON.stringify(card) },
+    });
+
+    // ── Step 4: Build atomic tx (fund → register → verify) ──
+    const [treasuryPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from('treasury')],
+      SAID_PROGRAM_ID
+    );
+
+    const FUND_AMOUNT = 0.015 * LAMPORTS_PER_SOL;
+
+    const fundIx = SystemProgram.transfer({
+      fromPubkey: sponsorKeypair.publicKey,
+      toPubkey: agentPubkey,
+      lamports: FUND_AMOUNT,
+    });
+
+    // register_agent instruction
+    const registerDiscriminator = Buffer.from([135, 157, 66, 195, 2, 113, 175, 30]);
+    const uriBytes = Buffer.from(metadataUri, 'utf8');
+    const uriLen = Buffer.alloc(4);
+    uriLen.writeUInt32LE(uriBytes.length);
+    const registerData = Buffer.concat([registerDiscriminator, uriLen, uriBytes]);
+
+    const registerIx = {
+      programId: SAID_PROGRAM_ID,
+      keys: [
+        { pubkey: pda, isSigner: false, isWritable: true },
+        { pubkey: agentPubkey, isSigner: true, isWritable: true },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      ],
+      data: registerData,
+    };
+
+    // get_verified instruction
+    const verifyDiscriminator = Buffer.from([132, 231, 2, 30, 115, 74, 23, 26]);
+    const verifyIx = {
+      programId: SAID_PROGRAM_ID,
+      keys: [
+        { pubkey: pda, isSigner: false, isWritable: true },
+        { pubkey: treasuryPda, isSigner: false, isWritable: true },
+        { pubkey: agentPubkey, isSigner: true, isWritable: true },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      ],
+      data: verifyDiscriminator,
+    };
+
+    // Build transaction
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+    const tx = new Transaction({ blockhash, lastValidBlockHeight, feePayer: sponsorKeypair.publicKey });
+    tx.add(fundIx);
+    tx.add(registerIx);
+    tx.add(verifyIx);
+
+    // Sponsor signs (fee payer + fund transfer)
+    tx.partialSign(sponsorKeypair);
+
+    // ── Step 5: Agent wallet signs via Privy ──
+    if (isLiveMode) {
+      const serializedTx = tx.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64');
+
+      const signResult = await privyClient.walletApi.rpc({
+        walletId: privyWalletId,
+        method: 'signTransaction',
+        params: { transaction: serializedTx },
+      });
+
+      // Deserialize the signed tx and broadcast
+      const signedTxBuffer = Buffer.from(signResult.data.signedTransaction, 'base64');
+      const signedTx = Transaction.from(signedTxBuffer);
+
+      const txHash = await connection.sendRawTransaction(signedTx.serialize(), {
+        skipPreflight: false,
+        preflightCommitment: 'confirmed',
+      });
+
+      const confirmation = await connection.confirmTransaction({
+        signature: txHash,
+        blockhash,
+        lastValidBlockHeight,
+      }, 'confirmed');
+
+      if (confirmation.value.err) {
+        return c.json({
+          error: 'On-chain transaction failed',
+          code: 'SOLANA_ERROR',
+          txHash,
+          details: JSON.stringify(confirmation.value.err),
+        }, 500);
+      }
+
+      console.log(`[SeekerClaw] On-chain registration confirmed: ${txHash}`);
+
+      // ── Step 6: Store in DB ──
+      const agent = await prisma.agent.upsert({
+        where: { wallet: walletAddress },
+        create: {
+          wallet: walletAddress,
+          pda: pda.toBase58(),
+          owner: walletAddress,
+          metadataUri,
+          registeredAt: new Date(),
+          isVerified: true,
+          verifiedAt: new Date(),
+          sponsored: true,
+          name: agent_name,
+          description: `${agent_name} - SeekerClaw AI Agent${metadata?.device_id ? ` [device:${metadata.device_id}]` : ''}`,
+          skills: metadata?.capabilities || ['payments', 'x402'],
+          registrationSource: 'seekerclaw',
+          layer2Verified: true,
+          layer2VerifiedAt: new Date(),
+          l2AttestationMethod: 'platform',
+          platformId: 'seekerclaw',
+        },
+        update: {
+          isVerified: true,
+          verifiedAt: new Date(),
+          registrationSource: 'seekerclaw',
+          platformId: 'seekerclaw',
+        },
+      });
+
+      // Store Privy wallet link
+      await prisma.agentWallet.create({
+        data: {
+          agentId: agent.id,
+          publicKey: walletAddress,
+          provider: walletProvider,
+          providerWalletId: privyWalletId,
+          walletType: 'transaction',
+          isPrimary: true,
+        },
+      });
+
+      // Track usage
+      const currentMonth = new Date().toISOString().slice(0, 7);
+      await prisma.monthlyUsage.upsert({
+        where: { platformId_month: { platformId: 'seekerclaw', month: currentMonth } },
+        create: { platformId: 'seekerclaw', month: currentMonth, agentsCreated: 1 },
+        update: { agentsCreated: { increment: 1 } },
+      });
+
+      emitAgentEvent('agent:registered', { wallet: walletAddress, name: agent_name, source: 'seekerclaw', txHash });
+
+      return c.json({
+        success: true,
+        agent: {
+          id: agent.id,
+          wallet: walletAddress,
+          pda: pda.toBase58(),
+          name: agent_name,
+          status: 'verified',
+          profile: `https://www.saidprotocol.com/agent.html?wallet=${walletAddress}`,
+          badge: `https://api.saidprotocol.com/api/badge/${walletAddress}.svg`,
+        },
+        privy_wallet: {
+          public_key: walletAddress,
+          provider: walletProvider,
+        },
+        on_chain: {
+          register_tx: txHash,
+          explorer: `https://solscan.io/tx/${txHash}`,
+          verification_fee_paid: '0.01 SOL',
+        },
+        cost: {
+          total_sol: 0.015,
+          breakdown: {
+            pda_rent: '~0.005 SOL',
+            verification_fee: '0.01 SOL (→ SAID treasury)',
+            tx_fees: '~0.00002 SOL',
+          },
+        },
+      });
+    } else {
+      // Mock mode — skip on-chain, just store in DB
+      const agent = await prisma.agent.upsert({
+        where: { wallet: walletAddress },
+        create: {
+          wallet: walletAddress,
+          pda: pda.toBase58(),
+          owner: walletAddress,
+          metadataUri,
+          registeredAt: new Date(),
+          isVerified: true,
+          verifiedAt: new Date(),
+          sponsored: true,
+          name: agent_name,
+          description: `${agent_name} - SeekerClaw AI Agent (mock)${metadata?.device_id ? ` [device:${metadata.device_id}]` : ''}`,
+          skills: metadata?.capabilities || ['payments', 'x402'],
+          registrationSource: 'seekerclaw',
+          layer2Verified: true,
+          layer2VerifiedAt: new Date(),
+          l2AttestationMethod: 'platform',
+          platformId: 'seekerclaw',
+        },
+        update: {
+          registrationSource: 'seekerclaw',
+          platformId: 'seekerclaw',
+        },
+      });
+
+      await prisma.agentWallet.create({
+        data: {
+          agentId: agent.id,
+          publicKey: walletAddress,
+          provider: walletProvider,
+          providerWalletId: privyWalletId,
+          walletType: 'transaction',
+          isPrimary: true,
+        },
+      });
+
+      const currentMonth = new Date().toISOString().slice(0, 7);
+      await prisma.monthlyUsage.upsert({
+        where: { platformId_month: { platformId: 'seekerclaw', month: currentMonth } },
+        create: { platformId: 'seekerclaw', month: currentMonth, agentsCreated: 1 },
+        update: { agentsCreated: { increment: 1 } },
+      });
+
+      return c.json({
+        success: true,
+        mock: true,
+        agent: {
+          id: agent.id,
+          wallet: walletAddress,
+          pda: pda.toBase58(),
+          name: agent_name,
+          status: 'verified',
+        },
+        privy_wallet: {
+          public_key: walletAddress,
+          provider: walletProvider,
+        },
+        note: 'Mock mode — no on-chain transaction. Set PRIVY_WALLET_MODE=live for production.',
+      });
+    }
+
+  } catch (error: any) {
+    console.error('[SeekerClaw Provision Error]', error);
+    return c.json({
+      error: 'Provisioning failed',
+      code: error.code || 'INTERNAL_ERROR',
+      details: error.message,
+      support: 'contact@saidprotocol.com',
+    }, 500);
+  }
+});
+
+/**
+ * POST /api/platforms/seekerclaw/sign
+ * Sign a transaction on behalf of a SeekerClaw agent.
+ * 
+ * SeekerClaw builds the transaction client-side, sends it here.
+ * We append a signing fee (if past free tier), sign via Privy, return the signed tx.
+ * SeekerClaw submits to RPC themselves.
+ */
+app.post('/api/platforms/seekerclaw/sign', async (c) => {
+  const apiKey = c.req.header('X-Platform-Key');
+  const expectedKey = process.env.SEEKERCLAW_API_KEY;
+
+  if (!expectedKey || !apiKey || apiKey !== expectedKey) {
+    return c.json({ error: 'Invalid API key' }, 401);
+  }
+
+  const body = await c.req.json();
+  const { agent_id, transaction, description } = body;
+
+  if (!agent_id || !transaction) {
+    return c.json({ error: 'Required: agent_id, transaction (base64)' }, 400);
+  }
+
+  try {
+    // Verify agent belongs to SeekerClaw
+    const agent = await prisma.agent.findUnique({
+      where: { id: agent_id },
+      include: { agentWallets: true },
+    });
+
+    if (!agent) return c.json({ error: 'Agent not found', code: 'NOT_FOUND' }, 404);
+    if (agent.registrationSource !== 'seekerclaw') {
+      return c.json({ error: 'Agent does not belong to SeekerClaw', code: 'FORBIDDEN' }, 403);
+    }
+
+    const wallet = agent.agentWallets.find(w => w.walletType === 'transaction' && w.isPrimary);
+    if (!wallet) return c.json({ error: 'No active wallet for this agent', code: 'NOT_FOUND' }, 404);
+
+    // Deserialize transaction
+    let tx: Transaction;
+    try {
+      const txBuffer = Buffer.from(transaction, 'base64');
+      tx = Transaction.from(txBuffer);
+    } catch {
+      return c.json({ error: 'Invalid transaction: failed to deserialize', code: 'INVALID_TRANSACTION' }, 400);
+    }
+
+    // Check monthly usage for fee tier
+    const currentMonth = new Date().toISOString().slice(0, 7);
+    const usage = await prisma.monthlyUsage.upsert({
+      where: { platformId_month: { platformId: 'seekerclaw', month: currentMonth } },
+      create: { platformId: 'seekerclaw', month: currentMonth },
+      update: {},
+    });
+
+    const FREE_TIER_LIMIT = 10_000;
+    const pastFreeTier = usage.signatures >= FREE_TIER_LIMIT;
+
+    // Determine fee
+    let feeLamports = 0;
+    if (pastFreeTier) {
+      if (usage.signatures < 100_000) feeLamports = 100_000;       // 0.0001 SOL
+      else if (usage.signatures < 1_000_000) feeLamports = 80_000;  // 0.00008 SOL
+      else feeLamports = 50_000;                                     // 0.00005 SOL
+
+      const SAID_TREASURY = new PublicKey('2XfHTeNWTjNwUmgoXaafYuqHcAAXj8F5Kjw2Bnzi4FxH');
+      const agentPubkey = new PublicKey(wallet.publicKey);
+
+      // Pre-flight balance check
+      const balance = await connection.getBalance(agentPubkey);
+      if (balance < feeLamports + 5000) {
+        return c.json({
+          error: 'Insufficient balance for signing fee',
+          code: 'INSUFFICIENT_FUNDS',
+          balance_sol: balance / LAMPORTS_PER_SOL,
+          fee_sol: feeLamports / LAMPORTS_PER_SOL,
+        }, 402);
+      }
+
+      // Append fee instruction atomically
+      tx.add(SystemProgram.transfer({
+        fromPubkey: agentPubkey,
+        toPubkey: SAID_TREASURY,
+        lamports: feeLamports,
+      }));
+    }
+
+    // Sign via Privy
+    const serializedTx = tx.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64');
+
+    let signedTxBase64: string;
+    let signature: string;
+
+    if (wallet.provider === 'privy') {
+      const signResult = await privyClient.walletApi.rpc({
+        walletId: wallet.providerWalletId!,
+        method: 'signTransaction',
+        params: { transaction: serializedTx },
+      });
+      signedTxBase64 = signResult.data.signedTransaction;
+      const signedTx = Transaction.from(Buffer.from(signedTxBase64, 'base64'));
+      signature = bs58.encode(signedTx.signature!);
+    } else {
+      // Mock mode
+      signedTxBase64 = serializedTx;
+      signature = `mock-sig-${Date.now()}`;
+    }
+
+    // Update usage
+    const feeCollectedSol = feeLamports / LAMPORTS_PER_SOL;
+    await prisma.monthlyUsage.update({
+      where: { platformId_month: { platformId: 'seekerclaw', month: currentMonth } },
+      data: {
+        signatures: { increment: 1 },
+        feesCollected: { increment: feeCollectedSol },
+      },
+    });
+
+    console.log(`[SeekerClaw] Signed tx for agent ${agent_id}, fee: ${feeCollectedSol} SOL, sig: ${signature}`);
+
+    return c.json({
+      success: true,
+      signed_transaction: signedTxBase64,
+      signature,
+      fee_charged_sol: feeCollectedSol,
+      signatures_this_month: usage.signatures + 1,
+      free_signatures_remaining: Math.max(0, FREE_TIER_LIMIT - usage.signatures - 1),
+      submitted: false, // Partner submits to RPC
+    });
+
+  } catch (error: any) {
+    console.error('[SeekerClaw Sign Error]', error);
+    return c.json({
+      error: 'Signing failed',
+      code: error.code || 'INTERNAL_ERROR',
+      details: error.message,
+    }, 500);
+  }
+});
+
+/**
+ * GET /api/platforms/seekerclaw/agents
+ * List all SeekerClaw agents with pagination.
+ */
+app.get('/api/platforms/seekerclaw/agents', async (c) => {
+  const apiKey = c.req.header('X-Platform-Key');
+  const expectedKey = process.env.SEEKERCLAW_API_KEY;
+
+  if (!expectedKey || !apiKey || apiKey !== expectedKey) {
+    return c.json({ error: 'Invalid API key' }, 401);
+  }
+
+  const limit = Math.min(parseInt(c.req.query('limit') || '50'), 200);
+  const offset = parseInt(c.req.query('offset') || '0');
+  const status = c.req.query('status');
+
+  const where: any = { registrationSource: 'seekerclaw' };
+  if (status === 'verified') where.isVerified = true;
+  if (status === 'pending') where.isVerified = false;
+
+  const [agents, total] = await Promise.all([
+    prisma.agent.findMany({
+      where,
+      select: {
+        id: true, wallet: true, pda: true, name: true,
+        isVerified: true, createdAt: true, nftAddress: true,
+      },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      skip: offset,
+    }),
+    prisma.agent.count({ where }),
+  ]);
+
+  return c.json({
+    agents: agents.map(a => ({
+      agent_id: a.id,
+      wallet: a.wallet,
+      pda: a.pda,
+      name: a.name,
+      status: a.isVerified ? 'verified' : 'pending',
+      nft_address: a.nftAddress,
+      created_at: a.createdAt,
+    })),
+    total,
+    limit,
+    offset,
+  });
+});
+
+/**
+ * GET /api/platforms/seekerclaw/balance
+ * Check provisioning capacity and signing usage.
+ */
+app.get('/api/platforms/seekerclaw/balance', async (c) => {
+  const apiKey = c.req.header('X-Platform-Key');
+  const expectedKey = process.env.SEEKERCLAW_API_KEY;
+
+  if (!expectedKey || !apiKey || apiKey !== expectedKey) {
+    return c.json({ error: 'Invalid API key' }, 401);
+  }
+
+  const sponsorKey = process.env['SPAWNR_SPONSOR_PRIVATE_KEY'];
+  if (!sponsorKey) {
+    return c.json({ error: 'Sponsor wallet not configured' }, 500);
+  }
+
+  const sponsorKeypair = Keypair.fromSecretKey(bs58.decode(sponsorKey));
+  const sponsorBalance = await connection.getBalance(sponsorKeypair.publicKey);
+
+  const currentMonth = new Date().toISOString().slice(0, 7);
+  const usage = await prisma.monthlyUsage.upsert({
+    where: { platformId_month: { platformId: 'seekerclaw', month: currentMonth } },
+    create: { platformId: 'seekerclaw', month: currentMonth },
+    update: {},
+  });
+
+  const costPerAgent = 0.015; // SOL
+  const estimatedAgentsRemaining = Math.floor(sponsorBalance / LAMPORTS_PER_SOL / costPerAgent);
+
+  const FREE_TIER_LIMIT = 10_000;
+  let currentFeeTier = 'free';
+  if (usage.signatures >= 1_000_000) currentFeeTier = '0.00005 SOL';
+  else if (usage.signatures >= 100_000) currentFeeTier = '0.00008 SOL';
+  else if (usage.signatures >= FREE_TIER_LIMIT) currentFeeTier = '0.0001 SOL';
+
+  return c.json({
+    sponsor_wallet_balance: sponsorBalance / LAMPORTS_PER_SOL,
+    cost_per_agent_sol: costPerAgent,
+    estimated_agents_remaining: estimatedAgentsRemaining,
+    month: currentMonth,
+    agents_created_this_month: usage.agentsCreated,
+    signatures_this_month: usage.signatures,
+    free_signatures_remaining: Math.max(0, FREE_TIER_LIMIT - usage.signatures),
+    fees_collected_sol: usage.feesCollected,
+    current_fee_tier: currentFeeTier,
+  });
+});
+
 // ============ CARD HOSTING ============
 // Host agent cards for agents who don't have their own hosting
 
