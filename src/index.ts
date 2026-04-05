@@ -3401,6 +3401,44 @@ app.post('/api/platforms/seekerclaw/provision', async (c) => {
         update: { agentsCreated: { increment: 1 } },
       });
 
+      // ── Step 7: Mint NFT (call hosting platform) ──
+      let nftAddress: string | undefined;
+      try {
+        const nftResponse = await fetch('https://app.saidprotocol.com/api/internal/mint-nft', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Internal-Key': process.env.INTERNAL_API_KEY || '',
+          },
+          body: JSON.stringify({
+            walletAddress,
+            name: agent_name,
+            description: `${agent_name} - SeekerClaw AI Agent${metadata?.device_id ? ` [device:${metadata.device_id}]` : ''}`,
+            capabilities: metadata?.capabilities || ['payments', 'x402'],
+            tier: 'seekerclaw',
+            ownerAddress: walletAddress, // Agent owns their NFT
+          }),
+        });
+
+        if (nftResponse.ok) {
+          const nftResult = await nftResponse.json();
+          nftAddress = nftResult.nft_address;
+          
+          // Update agent with NFT address
+          await prisma.agent.update({
+            where: { id: agent.id },
+            data: { nftAddress },
+          });
+          
+          console.log(`[SeekerClaw] Minted NFT for ${walletAddress}: ${nftAddress}`);
+        } else {
+          console.error(`[SeekerClaw] NFT mint failed: ${nftResponse.status} ${await nftResponse.text()}`);
+        }
+      } catch (nftError: any) {
+        console.error(`[SeekerClaw] NFT mint error (non-fatal):`, nftError.message);
+        // Non-fatal — agent is still fully provisioned even without NFT
+      }
+
       emitAgentEvent('agent:registered', { wallet: walletAddress, name: agent_name, source: 'seekerclaw', txHash });
 
       return c.json({
@@ -3411,6 +3449,7 @@ app.post('/api/platforms/seekerclaw/provision', async (c) => {
           pda: pda.toBase58(),
           name: agent_name,
           status: 'verified',
+          nft_address: nftAddress,
           profile: `https://www.saidprotocol.com/agent.html?wallet=${walletAddress}`,
           badge: `https://api.saidprotocol.com/api/badge/${walletAddress}.svg`,
         },
