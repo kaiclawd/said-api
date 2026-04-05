@@ -3408,7 +3408,7 @@ app.post('/api/platforms/seekerclaw/provision', async (c) => {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'X-Internal-Key': process.env.INTERNAL_API_KEY || '',
+            'X-Internal-Key': process.env.SAID_HOSTING_INTERNAL_KEY || '',
           },
           body: JSON.stringify({
             walletAddress,
