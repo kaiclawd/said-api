@@ -273,7 +273,7 @@ class PrivyWalletService {
     }
     
     // Real Privy SDK — create Solana wallet
-    const wallet = await this.privyClient.walletApi.create({ chainType: 'solana' });
+    const wallet = await this.privyClient.wallets.create({ chain_type: 'solana' });
     return {
       publicKey: wallet.address,
       providerWalletId: wallet.id,
@@ -294,17 +294,16 @@ class PrivyWalletService {
     }
     
     // Real Privy SDK — sign transaction via RPC
-    const result = await this.privyClient.walletApi.rpc({
-      walletId: providerWalletId,
+    const result = await this.privyClient.wallets._rpc(providerWalletId, {
       method: 'signTransaction',
       params: {
-        transaction: serializedTx,
         encoding: 'base64',
+        transaction: serializedTx,
       },
     });
     return {
-      signedTransaction: result.data?.signedTransaction || serializedTx,
-      signature: result.data?.signature || result.hash || 'unknown',
+      signedTransaction: (result.data as any)?.signed_transaction || serializedTx,
+      signature: (result.data as any)?.signature || result.hash || 'unknown',
     };
   }
   

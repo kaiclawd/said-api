@@ -3223,7 +3223,7 @@ app.post('/api/platforms/seekerclaw/provision', async (c) => {
 
     const isLiveMode = process.env.PRIVY_WALLET_MODE === 'live';
     if (isLiveMode) {
-      const wallet = await (privyClient as any).walletApi.create({ chainType: 'solana' });
+      const wallet = await (privyClient as any).wallets.create({ chain_type: 'solana' });
       agentPubkey = new PublicKey(wallet.address);
       privyWalletId = wallet.id;
       walletProvider = 'privy';
@@ -3321,14 +3321,13 @@ app.post('/api/platforms/seekerclaw/provision', async (c) => {
     if (isLiveMode) {
       const serializedTx = tx.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64');
 
-      const signResult = await (privyClient as any).walletApi.rpc({
-        walletId: privyWalletId,
+      const signResult = await (privyClient as any).wallets._rpc(privyWalletId, {
         method: 'signTransaction',
-        params: { transaction: serializedTx },
+        params: { encoding: 'base64', transaction: serializedTx },
       });
 
       // Deserialize the signed tx and broadcast
-      const signedTxBuffer = Buffer.from(signResult.data.signedTransaction, 'base64');
+      const signedTxBuffer = Buffer.from((signResult.data as any).signed_transaction, 'base64');
       const signedTx = Transaction.from(signedTxBuffer);
 
       const txHash = await connection.sendRawTransaction(signedTx.serialize(), {
@@ -3602,12 +3601,11 @@ app.post('/api/platforms/seekerclaw/sign', async (c) => {
     let signature: string;
 
     if (wallet.provider === 'privy') {
-      const signResult = await (privyClient as any).walletApi.rpc({
-        walletId: wallet.providerWalletId!,
+      const signResult = await (privyClient as any).wallets._rpc(wallet.providerWalletId!, {
         method: 'signTransaction',
-        params: { transaction: serializedTx },
+        params: { encoding: 'base64', transaction: serializedTx },
       });
-      signedTxBase64 = signResult.data.signedTransaction;
+      signedTxBase64 = (signResult.data as any).signed_transaction;
       const signedTx = Transaction.from(Buffer.from(signedTxBase64, 'base64'));
       signature = bs58.encode(signedTx.signature!);
     } else {
