@@ -3223,7 +3223,7 @@ app.post('/api/platforms/seekerclaw/provision', async (c) => {
 
     const isLiveMode = process.env.PRIVY_WALLET_MODE === 'live';
     if (isLiveMode) {
-      const wallet = await privyClient.walletApi.create({ chainType: 'solana' });
+      const wallet = await (privyClient as any).walletApi.create({ chainType: 'solana' });
       agentPubkey = new PublicKey(wallet.address);
       privyWalletId = wallet.id;
       walletProvider = 'privy';
@@ -3321,7 +3321,7 @@ app.post('/api/platforms/seekerclaw/provision', async (c) => {
     if (isLiveMode) {
       const serializedTx = tx.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64');
 
-      const signResult = await privyClient.walletApi.rpc({
+      const signResult = await (privyClient as any).walletApi.rpc({
         walletId: privyWalletId,
         method: 'signTransaction',
         params: { transaction: serializedTx },
@@ -3602,7 +3602,7 @@ app.post('/api/platforms/seekerclaw/sign', async (c) => {
     let signature: string;
 
     if (wallet.provider === 'privy') {
-      const signResult = await privyClient.walletApi.rpc({
+      const signResult = await (privyClient as any).walletApi.rpc({
         walletId: wallet.providerWalletId!,
         method: 'signTransaction',
         params: { transaction: serializedTx },
