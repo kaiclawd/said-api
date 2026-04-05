@@ -3765,7 +3765,7 @@ app.get('/api/platforms/seekerclaw/agents/:agent_id', async (c) => {
 
   const agent = await prisma.agent.findUnique({
     where: { id: agent_id },
-    include: { wallets: { where: { isPrimary: true }, take: 1 } },
+    include: { agentWallets: { where: { isPrimary: true }, take: 1 } },
   });
 
   if (!agent || agent.registrationSource !== 'seekerclaw') {
