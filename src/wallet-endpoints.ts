@@ -234,11 +234,15 @@ function createSessionAuthMiddleware(prisma: PrismaClient) {
 
 class PrivyWalletService {
   private isMock: boolean;
+  private privyClient: any;
   
-  constructor() {
+  constructor(privyClient?: any) {
+    this.privyClient = privyClient;
     this.isMock = process.env.PRIVY_WALLET_MODE !== 'live';
     if (this.isMock) {
-      console.log('[Privy Wallets] Running in MOCK mode. Set PRIVY_WALLET_MODE=live after Tuesday call.');
+      console.log('[Privy Wallets] Running in MOCK mode. Set PRIVY_WALLET_MODE=live for production.');
+    } else {
+      console.log('[Privy Wallets] Running in LIVE mode with Privy SDK.');
     }
   }
   
@@ -262,10 +266,13 @@ class PrivyWalletService {
       };
     }
     
-    // TODO: Real Privy SDK call after Tuesday
-    // const wallet = await privyClient.walletApi.create({ chainType: 'solana' });
-    // return { publicKey: wallet.address, providerWalletId: wallet.id, provider: 'privy' };
-    throw new Error('Live Privy wallet creation not yet implemented. Set PRIVY_WALLET_MODE=mock');
+    // Real Privy SDK — create Solana wallet
+    const wallet = await this.privyClient.walletApi.create({ chainType: 'solana' });
+    return {
+      publicKey: wallet.address,
+      providerWalletId: wallet.id,
+      provider: 'privy',
+    };
   }
   
   async signTransaction(providerWalletId: string, serializedTx: string): Promise<{
@@ -280,10 +287,19 @@ class PrivyWalletService {
       };
     }
     
-    // TODO: Real Privy SDK call
-    // IMPORTANT: Privy uses ECDSA P-256 authorization keys, not Ed25519
-    // Confirm exact flow on Tuesday call
-    throw new Error('Live Privy signing not yet implemented. Set PRIVY_WALLET_MODE=mock');
+    // Real Privy SDK — sign transaction via RPC
+    const result = await this.privyClient.walletApi.rpc({
+      walletId: providerWalletId,
+      method: 'signTransaction',
+      params: {
+        transaction: serializedTx,
+        encoding: 'base64',
+      },
+    });
+    return {
+      signedTransaction: result.data?.signedTransaction || serializedTx,
+      signature: result.data?.signature || result.hash || 'unknown',
+    };
   }
   
   async getBalance(publicKey: string, connection: Connection): Promise<{
@@ -311,9 +327,9 @@ type Variables = {
   userAgentIds: string[];
 };
 
-export function createWalletRoutes(prisma: PrismaClient, connection: Connection) {
+export function createWalletRoutes(prisma: PrismaClient, connection: Connection, privyClient?: any) {
   const app = new Hono<{ Variables: Variables }>();
-  const privyWallets = new PrivyWalletService();
+  const privyWallets = new PrivyWalletService(privyClient);
   const validateApiKey = createApiKeyMiddleware(prisma);
   const requireSession = createSessionAuthMiddleware(prisma);
   

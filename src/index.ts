@@ -6157,7 +6157,7 @@ initScoreWorker(prisma, connection);
 console.log('✅ Trust Score engine mounted (GET /api/score/:wallet)');
 
 // Mount Delegated Signing Authority (Privy wallet) routes
-const walletRoutes = createWalletRoutes(prisma, connection);
+const walletRoutes = createWalletRoutes(prisma, connection, privyClient);
 app.route('/', walletRoutes);
 console.log('✅ Delegated Signing Authority endpoints mounted (/v1/wallet/*, /v1/transaction/*, /v1/apikey/*, /v1/policy/*)');
 
