@@ -64,7 +64,9 @@ const SPENDING_STATUSES = ['pending', 'approved', 'signing', 'broadcast', 'confi
 // ============================================================
 
 const API_KEY_PREFIX = 'said_ak_';
-const API_KEY_SECRET = process.env.API_KEY_SECRET || crypto.randomBytes(32).toString('hex');
+// SAID_API_KEY_HMAC_SECRET: Used to HMAC-hash agent API keys before storing in DB.
+// MUST be consistent across deploys or all issued API keys become invalid.
+const API_KEY_SECRET = process.env.SAID_API_KEY_HMAC_SECRET || process.env.API_KEY_SECRET || crypto.randomBytes(32).toString('hex');
 
 // ============================================================
 // API Key Utilities
