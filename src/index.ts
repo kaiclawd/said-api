@@ -3463,10 +3463,11 @@ app.post('/api/platforms/seekerclaw/provision', async (c) => {
           verification_fee_paid: '0.01 SOL',
         },
         cost: {
-          total_sol: 0.015,
+          total_sol: 0.019,
           breakdown: {
             pda_rent: '~0.005 SOL',
             verification_fee: '0.01 SOL (→ SAID treasury)',
+            nft_mint_rent: '~0.004 SOL',
             tx_fees: '~0.00002 SOL',
           },
         },
@@ -3745,6 +3746,65 @@ app.get('/api/platforms/seekerclaw/agents', async (c) => {
     total,
     limit,
     offset,
+  });
+});
+
+/**
+ * GET /api/platforms/seekerclaw/agents/:agent_id
+ * Get single agent status, balance, and signature usage.
+ */
+app.get('/api/platforms/seekerclaw/agents/:agent_id', async (c) => {
+  const apiKey = c.req.header('X-Platform-Key');
+  const expectedKey = process.env.SEEKERCLAW_API_KEY;
+
+  if (!expectedKey || !apiKey || apiKey !== expectedKey) {
+    return c.json({ error: 'Invalid API key' }, 401);
+  }
+
+  const { agent_id } = c.req.param();
+
+  const agent = await prisma.agent.findUnique({
+    where: { id: agent_id },
+    include: { wallets: { where: { isPrimary: true }, take: 1 } },
+  });
+
+  if (!agent || agent.registrationSource !== 'seekerclaw') {
+    return c.json({ error: 'Agent not found' }, 404);
+  }
+
+  // Get on-chain balance
+  let balanceSol = 0;
+  try {
+    const balance = await connection.getBalance(new PublicKey(agent.wallet));
+    balanceSol = balance / LAMPORTS_PER_SOL;
+  } catch {}
+
+  // Get monthly signature usage
+  const currentMonth = new Date().toISOString().slice(0, 7);
+  const usage = await prisma.monthlyUsage.findUnique({
+    where: { platformId_month: { platformId: `agent:${agent_id}`, month: currentMonth } },
+  });
+
+  const AGENT_FREE_TIER = 10;
+  const sigs = usage?.signatures || 0;
+
+  return c.json({
+    agent_id: agent.id,
+    wallet: agent.wallet,
+    pda: agent.pda,
+    name: agent.name,
+    status: agent.isVerified ? 'verified' : 'pending',
+    nft_address: agent.nftAddress,
+    balance_sol: balanceSol,
+    created_at: agent.createdAt,
+    usage: {
+      month: currentMonth,
+      signatures: sigs,
+      free_remaining: Math.max(0, AGENT_FREE_TIER - sigs),
+      fees_paid_sol: usage?.feesCollected || 0,
+    },
+    profile: `https://www.saidprotocol.com/agent.html?wallet=${agent.wallet}`,
+    badge: `https://api.saidprotocol.com/api/badge/${agent.wallet}.svg`,
   });
 });
 
