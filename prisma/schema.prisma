@@ -398,15 +398,11 @@ model AgentWallet {
   // Metadata from Privy
   metadata          Json?
   
-  // Partner integration
-  externalId        String?   @unique  // Partner's agent ID (e.g. SeekerClaw device agent ID)
-  
   // Relations
   transactions      TransactionRequest[]
   
   @@unique([agentId, walletType])  // One wallet per type per agent
   @@index([agentId])
-  @@index([externalId])
   @@index([publicKey])
   @@index([status])
 }
