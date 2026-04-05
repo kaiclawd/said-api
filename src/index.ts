@@ -3593,23 +3593,32 @@ app.post('/api/platforms/seekerclaw/sign', async (c) => {
       return c.json({ error: 'Invalid transaction: failed to deserialize', code: 'INVALID_TRANSACTION' }, 400);
     }
 
-    // Check monthly usage for fee tier
+    // Check monthly usage — per-agent free tier, platform-level volume pricing
     const currentMonth = new Date().toISOString().slice(0, 7);
-    const usage = await prisma.monthlyUsage.upsert({
+
+    // Per-agent usage (for free tier)
+    const agentUsage = await prisma.monthlyUsage.upsert({
+      where: { platformId_month: { platformId: `agent:${agent_id}`, month: currentMonth } },
+      create: { platformId: `agent:${agent_id}`, month: currentMonth },
+      update: {},
+    });
+
+    // Platform-wide usage (for volume tier pricing)
+    const platformUsage = await prisma.monthlyUsage.upsert({
       where: { platformId_month: { platformId: 'seekerclaw', month: currentMonth } },
       create: { platformId: 'seekerclaw', month: currentMonth },
       update: {},
     });
 
-    const FREE_TIER_LIMIT = 10_000;
-    const pastFreeTier = usage.signatures >= FREE_TIER_LIMIT;
+    const AGENT_FREE_TIER = 10; // 10 free sigs per agent per month
+    const pastFreeTier = agentUsage.signatures >= AGENT_FREE_TIER;
 
-    // Determine fee
+    // Determine fee — free tier per-agent, volume discounts per-platform
     let feeLamports = 0;
     if (pastFreeTier) {
-      if (usage.signatures < 100_000) feeLamports = 100_000;       // 0.0001 SOL
-      else if (usage.signatures < 1_000_000) feeLamports = 80_000;  // 0.00008 SOL
-      else feeLamports = 50_000;                                     // 0.00005 SOL
+      if (platformUsage.signatures < 100_000) feeLamports = 100_000;       // 0.0001 SOL
+      else if (platformUsage.signatures < 1_000_000) feeLamports = 80_000;  // 0.00008 SOL
+      else feeLamports = 50_000;                                             // 0.00005 SOL
 
       const SAID_TREASURY = new PublicKey('2XfHTeNWTjNwUmgoXaafYuqHcAAXj8F5Kjw2Bnzi4FxH');
       const agentPubkey = new PublicKey(wallet.publicKey);
@@ -3653,15 +3662,18 @@ app.post('/api/platforms/seekerclaw/sign', async (c) => {
       signature = `mock-sig-${Date.now()}`;
     }
 
-    // Update usage
+    // Update usage — both agent-level and platform-level
     const feeCollectedSol = feeLamports / LAMPORTS_PER_SOL;
-    await prisma.monthlyUsage.update({
-      where: { platformId_month: { platformId: 'seekerclaw', month: currentMonth } },
-      data: {
-        signatures: { increment: 1 },
-        feesCollected: { increment: feeCollectedSol },
-      },
-    });
+    await Promise.all([
+      prisma.monthlyUsage.update({
+        where: { platformId_month: { platformId: `agent:${agent_id}`, month: currentMonth } },
+        data: { signatures: { increment: 1 }, feesCollected: { increment: feeCollectedSol } },
+      }),
+      prisma.monthlyUsage.update({
+        where: { platformId_month: { platformId: 'seekerclaw', month: currentMonth } },
+        data: { signatures: { increment: 1 }, feesCollected: { increment: feeCollectedSol } },
+      }),
+    ]);
 
     console.log(`[SeekerClaw] Signed tx for agent ${agent_id}, fee: ${feeCollectedSol} SOL, sig: ${signature}`);
 
@@ -3670,8 +3682,9 @@ app.post('/api/platforms/seekerclaw/sign', async (c) => {
       signed_transaction: signedTxBase64,
       signature,
       fee_charged_sol: feeCollectedSol,
-      signatures_this_month: usage.signatures + 1,
-      free_signatures_remaining: Math.max(0, FREE_TIER_LIMIT - usage.signatures - 1),
+      agent_signatures_this_month: agentUsage.signatures + 1,
+      agent_free_remaining: Math.max(0, AGENT_FREE_TIER - agentUsage.signatures - 1),
+      platform_signatures_this_month: platformUsage.signatures + 1,
       submitted: false, // Partner submits to RPC
     });
 
@@ -3765,11 +3778,10 @@ app.get('/api/platforms/seekerclaw/balance', async (c) => {
   const costPerAgent = 0.015; // SOL
   const estimatedAgentsRemaining = Math.floor(sponsorBalance / LAMPORTS_PER_SOL / costPerAgent);
 
-  const FREE_TIER_LIMIT = 10_000;
-  let currentFeeTier = 'free';
+  let currentFeeTier = 'free (10 per agent)';
   if (usage.signatures >= 1_000_000) currentFeeTier = '0.00005 SOL';
   else if (usage.signatures >= 100_000) currentFeeTier = '0.00008 SOL';
-  else if (usage.signatures >= FREE_TIER_LIMIT) currentFeeTier = '0.0001 SOL';
+  else if (usage.signatures >= 10_000) currentFeeTier = '0.0001 SOL';
 
   return c.json({
     sponsor_wallet_balance: sponsorBalance / LAMPORTS_PER_SOL,
@@ -3777,10 +3789,10 @@ app.get('/api/platforms/seekerclaw/balance', async (c) => {
     estimated_agents_remaining: estimatedAgentsRemaining,
     month: currentMonth,
     agents_created_this_month: usage.agentsCreated,
-    signatures_this_month: usage.signatures,
-    free_signatures_remaining: Math.max(0, FREE_TIER_LIMIT - usage.signatures),
+    platform_signatures_this_month: usage.signatures,
     fees_collected_sol: usage.feesCollected,
-    current_fee_tier: currentFeeTier,
+    current_volume_tier: currentFeeTier,
+    free_tier_model: '10 signatures per agent per month',
   });
 });
 
