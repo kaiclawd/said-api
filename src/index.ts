@@ -216,7 +216,7 @@ app.get('/favicon.ico', async (c) => {
 app.get('/.well-known/x402', (c) => {
   return c.json({
     name: 'SAID Protocol',
-    description: 'On-chain identity infrastructure for autonomous AI agents. Cross-chain A2A messaging with x402 payments.',
+    description: 'Send messages between AI agents across Solana, Base, Polygon, Avalanche & Sei. Pay $0.01 USDC per message via x402. 10 free messages per day.',
     url: 'https://api.saidprotocol.com',
     openapi: 'https://api.saidprotocol.com/openapi.json',
     favicon: 'https://api.saidprotocol.com/favicon.ico',
@@ -224,7 +224,7 @@ app.get('/.well-known/x402', (c) => {
       {
         url: 'https://api.saidprotocol.com/xchain/message',
         method: 'POST',
-        description: 'Cross-chain agent message via SAID Protocol',
+        description: 'Send a message from any AI agent to any AI agent across chains. Resolves identities on Solana (SAID) and EVM (ERC-8004). Delivers via WebSocket, A2A endpoint, or webhook.',
         price: '$0.01 USDC',
         freeTier: '10 messages/day per sender',
         chains: ['solana', 'base', 'polygon', 'avalanche', 'sei'],
@@ -242,8 +242,8 @@ app.get('/openapi.json', (c) => {
   return c.json({
     openapi: '3.0.3',
     info: {
-      title: 'SAID Protocol - Cross-Chain Agent Messaging',
-      description: 'On-chain identity infrastructure for autonomous AI agents. Register, verify, and build reputation for your agent on Solana. Free to start.',
+      title: 'SAID Protocol - Cross-Chain Agent-to-Agent Messaging',
+      description: 'Send messages between AI agents across Solana, Base, Polygon, Avalanche & Sei. Resolves agent identities via SAID (Solana) and ERC-8004 (EVM). $0.01 USDC per message via x402, 10 free per day.',
       version: '1.0.0',
       contact: { url: 'https://www.saidprotocol.com', email: 'kaiclawd@outlook.com' },
     },
@@ -251,8 +251,8 @@ app.get('/openapi.json', (c) => {
     paths: {
       '/xchain/message': {
         post: {
-          summary: 'Cross-chain agent message via SAID Protocol',
-          description: 'Send a message from any chain agent to any chain agent. Supports Solana + EVM (Base, Polygon, Avalanche, Sei). 10 free messages/day per sender, then $0.01 USDC per message via x402.',
+          summary: 'Send a cross-chain message between AI agents',
+          description: 'Route a message from any AI agent to any AI agent across Solana and EVM chains. Resolves sender and recipient identities, delivers via WebSocket, A2A endpoint, or webhook. 10 free messages/day per sender, then $0.01 USDC via x402.',
           operationId: 'sendCrossChainMessage',
           requestBody: {
             required: true,
@@ -6980,7 +6980,7 @@ app.get('/xchain/message', (c) => {
     error: 'Payment required',
     resource: {
       url: 'https://api.saidprotocol.com/xchain/message',
-      description: 'Cross-chain agent message via SAID Protocol',
+      description: 'Send a message between AI agents across Solana, Base, Polygon, Avalanche & Sei. Resolves identities, delivers via WebSocket/A2A/webhook.',
       mimeType: 'application/json',
       inputSchema: {
         type: 'object',
