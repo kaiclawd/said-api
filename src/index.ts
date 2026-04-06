@@ -197,6 +197,66 @@ app.get('/api/events', (c) => {
 
 // Health check
 app.get('/', (c) => c.json({ status: 'ok', service: 'said-api', version: '1.0.0' }));
+// ── x402scan Discovery: OpenAPI spec ──
+app.get('/openapi.json', (c) => {
+  return c.json({
+    openapi: '3.0.3',
+    info: {
+      title: 'SAID Protocol - Cross-Chain Agent Messaging',
+      description: 'On-chain identity infrastructure for autonomous AI agents. Register, verify, and build reputation for your agent on Solana. Free to start.',
+      version: '1.0.0',
+      contact: { url: 'https://www.saidprotocol.com', email: 'kaiclawd@outlook.com' },
+    },
+    servers: [{ url: 'https://api.saidprotocol.com' }],
+    paths: {
+      '/xchain/message': {
+        post: {
+          summary: 'Cross-chain agent message via SAID Protocol',
+          description: 'Send a message from any chain agent to any chain agent. Supports Solana + EVM (Base, Polygon, Avalanche, Sei). 10 free messages/day per sender, then $0.01 USDC per message via x402.',
+          operationId: 'sendCrossChainMessage',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['from', 'to', 'message'],
+                  properties: {
+                    from: {
+                      type: 'object',
+                      required: ['address', 'chain'],
+                      properties: {
+                        address: { type: 'string', description: 'Sender wallet address' },
+                        chain: { type: 'string', enum: ['solana', 'base', 'polygon', 'avalanche', 'sei'], description: 'Source chain' },
+                      },
+                    },
+                    to: {
+                      type: 'object',
+                      required: ['address', 'chain'],
+                      properties: {
+                        address: { type: 'string', description: 'Recipient wallet address' },
+                        chain: { type: 'string', enum: ['solana', 'base', 'polygon', 'avalanche', 'sei'], description: 'Destination chain' },
+                      },
+                    },
+                    message: { type: 'string', description: 'Message content' },
+                    context: { type: 'object', description: 'Optional context/metadata' },
+                    signature: { type: 'string', description: 'Optional sender signature for verification' },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            '200': { description: 'Message delivered or stored successfully' },
+            '402': { description: 'Payment required (x402) — 10 free messages/day exceeded' },
+            '404': { description: 'Sender or recipient agent not found' },
+          },
+        },
+      },
+    },
+  });
+});
+
 app.get('/health', (c) => c.json({ status: 'healthy' }));
 
 // ============ AVATAR GENERATOR ============
@@ -6872,6 +6932,73 @@ app.use('*', createX402Middleware());
 console.log(`✅ x402 payment gate active on POST /xchain/message ($0.01 USDC via Coinbase x402 SDK)`);
 console.log(`✅ Free tier: ${FREE_MESSAGES_PER_DAY} messages/day per agent`);
 console.log(`✅ Supported payment chains: ${Object.keys(CHAINS).join(', ')}`);
+
+// GET /xchain/message — return 402 challenge for x402scan discovery
+app.get('/xchain/message', (c) => {
+  const paymentChallenge = {
+    x402Version: 2,
+    error: 'Payment required',
+    resource: {
+      url: 'https://api.saidprotocol.com/xchain/message',
+      description: 'Cross-chain agent message via SAID Protocol',
+      mimeType: 'application/json',
+      inputSchema: {
+        type: 'object',
+        required: ['from', 'to', 'message'],
+        properties: {
+          from: {
+            type: 'object',
+            required: ['address', 'chain'],
+            properties: {
+              address: { type: 'string', description: 'Sender wallet address' },
+              chain: { type: 'string', enum: ['solana', 'base', 'polygon', 'avalanche', 'sei'] },
+            },
+          },
+          to: {
+            type: 'object',
+            required: ['address', 'chain'],
+            properties: {
+              address: { type: 'string', description: 'Recipient wallet address' },
+              chain: { type: 'string', enum: ['solana', 'base', 'polygon', 'avalanche', 'sei'] },
+            },
+          },
+          message: { type: 'string', description: 'Message content' },
+          context: { type: 'object', description: 'Optional context/metadata' },
+        },
+      },
+      outputSchema: {
+        type: 'object',
+        properties: {
+          success: { type: 'boolean' },
+          messageId: { type: 'string' },
+          status: { type: 'string', enum: ['delivered', 'stored'] },
+          from: { type: 'object' },
+          to: { type: 'object' },
+        },
+      },
+    },
+    accepts: [
+      {
+        scheme: 'exact',
+        network: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',
+        price: '0.01',
+        payTo: process.env.SAID_X402_TREASURY || 'EK3mP45iwgDEEts2cEDfhAs2i4PrH63NMG7vHg2d6fas',
+        description: '$0.01 USDC on Solana',
+      },
+      {
+        scheme: 'exact',
+        network: 'eip155:8453',
+        price: '0.01',
+        payTo: process.env.SAID_EVM_TREASURY || '',
+        description: '$0.01 USDC on Base',
+      },
+    ],
+  };
+
+  const encoded = Buffer.from(JSON.stringify(paymentChallenge)).toString('base64');
+  c.header('Payment-Required', encoded);
+  return c.json(paymentChallenge, 402);
+});
 
 app.route('/xchain', crossChainRoutes);
 console.log('✅ Cross-Chain Communication endpoints mounted');
