@@ -212,6 +212,31 @@ app.get('/favicon.ico', async (c) => {
   }
 });
 
+// ── x402scan Discovery ──
+app.get('/.well-known/x402', (c) => {
+  return c.json({
+    name: 'SAID Protocol',
+    description: 'On-chain identity infrastructure for autonomous AI agents. Cross-chain A2A messaging with x402 payments.',
+    url: 'https://api.saidprotocol.com',
+    openapi: 'https://api.saidprotocol.com/openapi.json',
+    favicon: 'https://api.saidprotocol.com/favicon.ico',
+    endpoints: [
+      {
+        url: 'https://api.saidprotocol.com/xchain/message',
+        method: 'POST',
+        description: 'Cross-chain agent message via SAID Protocol',
+        price: '$0.01 USDC',
+        freeTier: '10 messages/day per sender',
+        chains: ['solana', 'base', 'polygon', 'avalanche', 'sei'],
+      },
+    ],
+    contact: {
+      twitter: '@saidinfra',
+      website: 'https://www.saidprotocol.com',
+    },
+  });
+});
+
 // ── x402scan Discovery: OpenAPI spec ──
 app.get('/openapi.json', (c) => {
   return c.json({
