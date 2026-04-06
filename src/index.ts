@@ -197,6 +197,21 @@ app.get('/api/events', (c) => {
 
 // Health check
 app.get('/', (c) => c.json({ status: 'ok', service: 'said-api', version: '1.0.0' }));
+// ── Favicon ──
+app.get('/favicon.ico', async (c) => {
+  try {
+    const fs = await import('fs');
+    const path = await import('path');
+    const faviconPath = path.join(process.cwd(), 'public', 'favicon.png');
+    const data = fs.readFileSync(faviconPath);
+    c.header('Content-Type', 'image/png');
+    c.header('Cache-Control', 'public, max-age=86400');
+    return c.body(data);
+  } catch {
+    return c.text('', 404);
+  }
+});
+
 // ── x402scan Discovery: OpenAPI spec ──
 app.get('/openapi.json', (c) => {
   return c.json({
