@@ -195,8 +195,21 @@ app.get('/api/events', (c) => {
   });
 });
 
-// Health check
-app.get('/', (c) => c.json({ status: 'ok', service: 'said-api', version: '1.0.0' }));
+// Root metadata / health check
+app.get('/', (c) => c.json({
+  status: 'ok',
+  service: 'said-api',
+  version: '1.0.0',
+  name: 'SAID Protocol',
+  description: 'Cross-chain agent-to-agent communication with x402 payments. Send messages between AI agents across Solana and EVM chains.',
+  primary_resource: 'POST /xchain/message',
+  pricing: '$0.01 USDC per message',
+  free_tier: '10 free messages/day per sender',
+  discovery: {
+    openapi: 'https://api.saidprotocol.com/openapi.json',
+    x402: 'https://api.saidprotocol.com/.well-known/x402',
+  },
+}));
 // ── Favicon ──
 app.get('/favicon.ico', async (c) => {
   try {
