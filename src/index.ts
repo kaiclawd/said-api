@@ -1025,7 +1025,7 @@ app.post('/api/register/sponsored', async (c) => {
     return c.json({ 
       error: 'Wallet already registered',
       pda: existing.pda,
-      profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`
+      profile: `https://www.saidprotocol.com/agents/${wallet}`
     }, 409);
   }
   
@@ -1126,7 +1126,7 @@ app.post('/api/register/sponsored', async (c) => {
       wallet,
       pda: pda.toString(),
       metadataUri,
-      profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+      profile: `https://www.saidprotocol.com/agents/${wallet}`,
       badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
       slotsRemaining: remainingSlots,
     });
@@ -1209,7 +1209,7 @@ app.post('/api/register/pending', async (c) => {
       wallet,
       pda: existing.pda,
       status: existing.isVerified ? 'VERIFIED' : (existing.sponsored ? 'REGISTERED' : 'PENDING'),
-      profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`
+      profile: `https://www.saidprotocol.com/agents/${wallet}`
     });
   }
   
@@ -1278,7 +1278,7 @@ app.post('/api/register/pending', async (c) => {
       pda: pda.toString(),
       status: 'PENDING',
       metadataUri,
-      profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+      profile: `https://www.saidprotocol.com/agents/${wallet}`,
       badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
       layer2Verified: isFrameworkAttestation,
       l2AttestationMethod: isFrameworkAttestation ? 'framework' : null,
@@ -1417,7 +1417,7 @@ app.post('/api/platforms/spawnr/register', async (c) => {
         pda: pda.toString(),
         name: existing.name || name,
         verified: true,
-        profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+        profile: `https://www.saidprotocol.com/agents/${wallet}`,
         badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
       }
     });
@@ -1666,7 +1666,7 @@ app.post('/api/platforms/spawnr/confirm', async (c) => {
         name: agent.name,
         verified: true,
         onChain: true,
-        profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+        profile: `https://www.saidprotocol.com/agents/${wallet}`,
         badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
         badgeWithScore: `https://api.saidprotocol.com/api/badge/${wallet}.svg?style=score`,
       },
@@ -1738,7 +1738,7 @@ app.post('/api/platforms/spawnr/confirm', async (c) => {
             name: agent.name,
             verified: true,
             onChain: true,
-            profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+            profile: `https://www.saidprotocol.com/agents/${wallet}`,
             badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
           },
         });
@@ -1847,7 +1847,7 @@ app.post('/api/platforms/clawpump/register', async (c) => {
         pda: pda.toString(),
         name: existing.name || name,
         verified: true,
-        profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+        profile: `https://www.saidprotocol.com/agents/${wallet}`,
         badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
       }
     });
@@ -2097,7 +2097,7 @@ app.post('/api/platforms/clawpump/confirm', async (c) => {
         name: agent.name,
         verified: true,
         onChain: true,
-        profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+        profile: `https://www.saidprotocol.com/agents/${wallet}`,
         badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
         badgeWithScore: `https://api.saidprotocol.com/api/badge/${wallet}.svg?style=score`,
       },
@@ -2169,7 +2169,7 @@ app.post('/api/platforms/clawpump/confirm', async (c) => {
             name: agent.name,
             verified: true,
             onChain: true,
-            profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+            profile: `https://www.saidprotocol.com/agents/${wallet}`,
             badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
           },
         });
@@ -2279,7 +2279,7 @@ app.post('/api/platforms/said-hosting/register', async (c) => {
         pda: pda.toString(),
         name: existing.name || name,
         verified: true,
-        profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+        profile: `https://www.saidprotocol.com/agents/${wallet}`,
         badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
       }
     });
@@ -2599,7 +2599,7 @@ app.post('/api/platforms/said-hosting/confirm', async (c) => {
         name: agent.name,
         verified: true,
         onChain: true,
-        profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+        profile: `https://www.saidprotocol.com/agents/${wallet}`,
         badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
         badgeWithScore: `https://api.saidprotocol.com/api/badge/${wallet}.svg?style=score`,
       },
@@ -2671,7 +2671,7 @@ app.post('/api/platforms/said-hosting/confirm', async (c) => {
             name: agent.name,
             verified: true,
             onChain: true,
-            profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+            profile: `https://www.saidprotocol.com/agents/${wallet}`,
             badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
           },
         });
@@ -4215,7 +4215,7 @@ app.get('/api/badge/:wallet', async (c) => {
   }
   
   const baseUrl = 'https://api.saidprotocol.com';
-  const profileUrl = `https://www.saidprotocol.com/agent.html?wallet=${wallet}`;
+  const profileUrl = `https://www.saidprotocol.com/agents/${wallet}`;
   
   return c.json({
     agent: {
@@ -4440,7 +4440,7 @@ app.get('/api/verify/:wallet', async (c) => {
     skills: agent.skills,
     registeredAt: agent.registeredAt.toISOString(),
     urls: {
-      profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+      profile: `https://www.saidprotocol.com/agents/${wallet}`,
       badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
       badgeWithScore: `https://api.saidprotocol.com/api/badge/${wallet}.svg?style=score`,
     },
@@ -4709,7 +4709,7 @@ app.get('/api/passport/:wallet/metadata', async (c) => {
     symbol: 'SAID',
     description: 'Soulbound AI agent identity passport. Issued by SAID Protocol on Solana. Non-transferable.',
     image: 'https://raw.githubusercontent.com/kaiclawd/said/main/passport-logo.png',
-    external_url: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+    external_url: `https://www.saidprotocol.com/agents/${wallet}`,
     attributes: [
       { trait_type: 'Protocol', value: 'SAID' },
       { trait_type: 'Wallet', value: wallet },
@@ -4901,7 +4901,7 @@ app.post('/api/passport/:wallet/finalize', async (c) => {
     passportTxHash: txHash,
     imageUrl: `https://api.saidprotocol.com/api/passport/${wallet}/image`,
     metadataUrl: `https://api.saidprotocol.com/api/passport/${wallet}/metadata`,
-    profileUrl: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+    profileUrl: `https://www.saidprotocol.com/agents/${wallet}`,
     message: 'SAID Passport minted. Your on-chain identity is now permanent and portable.',
   });
 });
@@ -6643,7 +6643,7 @@ app.get('/api/agent/resolve/:wallet', async (c) => {
         wallet,
         agent: {
           ...agent,
-          profile: `https://www.saidprotocol.com/agent.html?wallet=${wallet}`,
+          profile: `https://www.saidprotocol.com/agents/${wallet}`,
           badge: `https://api.saidprotocol.com/api/badge/${wallet}.svg`,
         }
       });
@@ -6675,7 +6675,7 @@ app.get('/api/agent/resolve/:wallet', async (c) => {
           linkedTo: primaryAgent.wallet,
           agent: {
             ...primaryAgent,
-            profile: `https://www.saidprotocol.com/agent.html?wallet=${primaryAgent.wallet}`,
+            profile: `https://www.saidprotocol.com/agents/${primaryAgent.wallet}`,
             badge: `https://api.saidprotocol.com/api/badge/${primaryAgent.wallet}.svg`,
           }
         });
@@ -6731,7 +6731,7 @@ app.get('/api/agent/:wallet/wallets', async (c) => {
         wallet: agent.wallet,
         pda: agent.pda,
         name: agent.name,
-        profile: `https://www.saidprotocol.com/agent.html?wallet=${agent.wallet}`,
+        profile: `https://www.saidprotocol.com/agents/${agent.wallet}`,
       },
       wallets: {
         primary: {
