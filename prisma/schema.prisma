@@ -101,9 +101,17 @@ model Feedback {
   fromIsVerified Boolean @default(false) // Was giver verified at time of feedback?
   txHash         String? // On-chain hash if stored on-chain
 
+  // Idempotency key for partner-submitted outcome rows (`src:<partner>:<externalId>`).
+  // Null for peer feedback from the agents door — peer rows stay one-per-pair,
+  // enforced in the route (the old @@unique([fromWallet, toWallet]) is gone so
+  // partners can write one row per OUTCOME, not one per counterparty pair; the
+  // v0.8 backfill emits one event per row keyed by `fb:<id>`, so multiple rows
+  // per pair are safe for the scorer).
+  sourceKey String? @unique
+
   createdAt DateTime @default(now())
 
-  @@unique([fromWallet, toWallet])
+  @@index([fromWallet, toWallet])
   @@index([toWallet])
   @@index([score])
 }

@@ -188,6 +188,13 @@ import { EventEmitter } from 'events';
 import { createScoreRoutes, initScoreWorker } from './score-engine.js';
 import { getV8Reputation, getV8ReputationBatch, legacyTrustTier } from './reputation-v0.8/read.js';
 import { buildScreenResult } from './trust-screen.js';
+import {
+  loadPartnerSources,
+  validateOutcomeItem,
+  buildSourceKey,
+  buildOutcomeComment,
+  MAX_BATCH_SIZE,
+} from './outcomes.js';
 const sseEmitter = new EventEmitter();
 sseEmitter.setMaxListeners(100); // support up to 100 concurrent SSE clients
 
@@ -850,28 +857,21 @@ app.post('/api/agents/:wallet/feedback', async (c) => {
     ? `[${source}] ${comment || ''}`.trim()
     : comment;
 
-  // Upsert feedback (one per fromWallet->toWallet pair)
-  const feedback = await prisma.feedback.upsert({
-    where: {
-      fromWallet_toWallet: { fromWallet, toWallet }
-    },
-    create: {
-      fromWallet,
-      toWallet,
-      score,
-      comment: fullComment,
-      signature,
-      weight,
-      fromIsVerified,
-    },
-    update: {
-      score,
-      comment: fullComment,
-      signature,
-      weight,
-      fromIsVerified,
-    }
+  // One peer-feedback row per fromWallet->toWallet pair, enforced here in code:
+  // partner outcome rows (sourceKey != null) share this table and may repeat
+  // pairs, so the old DB-level @@unique is gone. A concurrent duplicate here is
+  // signature-gated and bounded by the 5-minute replay window — acceptable.
+  const existingPeer = await prisma.feedback.findFirst({
+    where: { fromWallet, toWallet, sourceKey: null },
   });
+  const feedback = existingPeer
+    ? await prisma.feedback.update({
+        where: { id: existingPeer.id },
+        data: { score, comment: fullComment, signature, weight, fromIsVerified },
+      })
+    : await prisma.feedback.create({
+        data: { fromWallet, toWallet, score, comment: fullComment, signature, weight, fromIsVerified },
+      });
   
   // Recalculate weighted reputation
   const allFeedback = await prisma.feedback.findMany({
@@ -919,20 +919,15 @@ app.get('/api/agents/:wallet/feedback/message', async (c) => {
 
 // ============ TRUSTED SOURCE FEEDBACK ============
 
-// Trusted sources (platforms that can submit feedback without user signatures)
-// API keys loaded from environment variables for security
-const TRUSTED_SOURCES: Record<string, { name: string; weight: number }> = {};
+// Trusted sources (platforms that can submit feedback without user signatures).
+// API keys + weights live in src/outcomes.ts (single table serving this legacy
+// door and the batch door below); keys come from environment variables.
+const TRUSTED_SOURCES = loadPartnerSources(process.env);
 
-// Load trusted source keys from environment variables
-if (process.env.TORCH_API_KEY) {
-  TRUSTED_SOURCES[process.env.TORCH_API_KEY] = { name: 'torch-market', weight: 1.5 };
-}
-if (process.env.SOLPRISM_API_KEY) {
-  TRUSTED_SOURCES[process.env.SOLPRISM_API_KEY] = { name: 'solprism', weight: 1.5 };
-}
-if (process.env.AGENTDEX_API_KEY) {
-  TRUSTED_SOURCES[process.env.AGENTDEX_API_KEY] = { name: 'agentdex', weight: 1.2 };
-}
+// Partner-submitted rows need a valid Agent as fromWallet (FK) — the SAID
+// system wallet stands in as the writer; the real partner is carried in
+// sourceKey + comment.
+const SYSTEM_WALLET = '72onvrQJZkPGLAhWK5MeYc73iyM72P2ABKzDMQ4NpQBL';
 
 // Event type to score mapping
 const EVENT_SCORES: Record<string, number> = {
@@ -968,21 +963,22 @@ app.post('/api/sources/feedback', async (c) => {
     return c.json({ error: 'Agent not found. Must be registered on SAID first.' }, 404);
   }
   
-  // Calculate score based on event type and outcome
+  // Calculate score based on event type and outcome. Scores are 0-100 and the
+  // v0.8 backfill classifies score >= 50 as positive — so a success MUST land
+  // above 50 and a failure below it. (The old delta-style scores, e.g. +8 for
+  // a successful trade, landed below 50 and were read as negative feedback.)
   const baseScore = EVENT_SCORES[event] || 5;
-  const outcomeMultiplier = outcome === 'failure' ? -0.5 : 1;
-  const score = Math.round(baseScore * outcomeMultiplier * source.weight);
+  const isNegative = baseScore < 0 || outcome === 'failure';
+  const magnitude = Math.max(5, Math.min(45, Math.round(Math.abs(baseScore) * source.weight * 2)));
+  const score = isNegative ? 50 - magnitude : 50 + magnitude;
   
   // Create feedback record from trusted source
-  // Use SAID System wallet as the source since foreign key requires valid agent
-  const SYSTEM_WALLET = '72onvrQJZkPGLAhWK5MeYc73iyM72P2ABKzDMQ4NpQBL';
-  
   try {
     const feedback = await prisma.feedback.create({
       data: {
         fromWallet: SYSTEM_WALLET,
         toWallet: wallet,
-        score: Math.max(-100, Math.min(100, score)),
+        score,
         weight: source.weight,
         comment: `[${source.name}] ${event}${outcome ? `: ${outcome}` : ''}${metadata?.details ? ` - ${metadata.details}` : ''}`,
         signature: `trusted:${source.name}:${Date.now()}`,
@@ -1012,7 +1008,8 @@ app.post('/api/sources/feedback', async (c) => {
       success: true,
       source: source.name,
       event,
-      scoreChange: score,
+      scoreWritten: score,
+      scoreChange: score - 50, // signed effect (kept for callers of the old delta field)
       newReputationScore: clampedScore,
       trustTier,
       feedbackId: feedback.id,
@@ -1031,6 +1028,125 @@ app.get('/api/sources/events', (c) => {
   return c.json({
     events: Object.keys(EVENT_SCORES),
     scores: EVENT_SCORES,
+  });
+});
+
+// ============ PARTNER OUTCOMES — batch write-back door ============
+// POST /api/outcomes/batch — partners report execution outcomes in bulk.
+// One Feedback row per outcome (idempotent via sourceKey — safe to retry a
+// whole batch); the v0.8 backfill cron turns rows into reputation events.
+// Polarity/idempotency contract documented in src/outcomes.ts.
+app.post('/api/outcomes/batch', async (c) => {
+  const apiKey = c.req.header('X-Source-Key');
+  const partner = apiKey ? TRUSTED_SOURCES[apiKey] : undefined;
+  if (!partner) {
+    return c.json({ error: 'Invalid or missing X-Source-Key header' }, 401);
+  }
+
+  let body: any;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Body must be JSON' }, 400);
+  }
+  const outcomes = body?.outcomes;
+  if (!Array.isArray(outcomes) || outcomes.length === 0) {
+    return c.json({ error: 'Body must be { outcomes: [...] } with at least one item' }, 400);
+  }
+  if (outcomes.length > MAX_BATCH_SIZE) {
+    return c.json({ error: `Batch too large — max ${MAX_BATCH_SIZE} outcomes per request` }, 400);
+  }
+
+  const now = new Date();
+
+  // Validate everything up front — one bad item fails alone, not the batch.
+  const validations = outcomes.map((item: unknown) => validateOutcomeItem(item, now));
+
+  // Registration check in one query. Outcomes only accrue to SAID-registered
+  // identities — unregistered wallets are the registration funnel, not a bug.
+  const candidateWallets = Array.from(new Set<string>(
+    outcomes.filter((_: unknown, i: number) => validations[i].ok).map((o: any) => o.wallet)
+  ));
+  const registered = new Set(
+    (await prisma.agent.findMany({
+      where: { wallet: { in: candidateWallets } },
+      select: { wallet: true },
+    })).map((a) => a.wallet)
+  );
+
+  const results: Array<{ externalId?: string; ok: boolean; deduped?: boolean; feedbackId?: string; error?: string }> = [];
+  const touchedWallets = new Set<string>();
+  let written = 0;
+  let deduped = 0;
+  let failed = 0;
+
+  for (let i = 0; i < outcomes.length; i++) {
+    const item = outcomes[i];
+    const v = validations[i];
+    const externalId = typeof item?.externalId === 'string' ? item.externalId : undefined;
+    if (!v.ok) {
+      failed++;
+      results.push({ externalId, ok: false, error: v.error });
+      continue;
+    }
+    if (!registered.has(item.wallet)) {
+      failed++;
+      results.push({ externalId, ok: false, error: 'Agent not registered on SAID' });
+      continue;
+    }
+    const sourceKey = buildSourceKey(partner.name, item.externalId);
+    try {
+      const feedback = await prisma.feedback.create({
+        data: {
+          fromWallet: SYSTEM_WALLET,
+          toWallet: item.wallet,
+          score: v.score!,
+          weight: partner.weight,
+          comment: buildOutcomeComment(partner.name, item.event, item.outcome, item.details),
+          signature: `trusted:${partner.name}:${item.externalId}`,
+          fromIsVerified: true,
+          sourceKey,
+          ...(v.occurredAt ? { createdAt: v.occurredAt } : {}),
+        },
+      });
+      written++;
+      touchedWallets.add(item.wallet);
+      results.push({ externalId, ok: true, feedbackId: feedback.id });
+    } catch (err: any) {
+      if (err?.code === 'P2002') {
+        // sourceKey collision = this outcome was already recorded — idempotent replay
+        deduped++;
+        results.push({ externalId, ok: true, deduped: true });
+      } else {
+        failed++;
+        console.error(`[outcomes] write failed for ${sourceKey}:`, err);
+        results.push({ externalId, ok: false, error: 'Write failed' });
+      }
+    }
+  }
+
+  // Refresh each touched agent's cached score once, not once per row.
+  for (const wallet of touchedWallets) {
+    const allFeedback = await prisma.feedback.findMany({
+      where: { toWallet: wallet },
+      select: { score: true, weight: true },
+    });
+    await prisma.agent.update({
+      where: { wallet },
+      data: {
+        reputationScore: Math.round(computeReputationScore(allFeedback)),
+        feedbackCount: allFeedback.length,
+      },
+    });
+  }
+
+  return c.json({
+    partner: partner.name,
+    received: outcomes.length,
+    written,
+    deduped,
+    failed,
+    results,
   });
 });
 
@@ -7901,11 +8017,18 @@ app.post('/admin/feedback', async (c) => {
   if (!targetAgent) return c.json({ error: 'Agent not found' }, 404);
   const fromAgent = await prisma.agent.findUnique({ where: { wallet: fromWallet } });
   const weight = fromAgent?.isVerified ? 2.0 : 1.5;
-  const feedback = await prisma.feedback.upsert({
-    where: { fromWallet_toWallet: { fromWallet, toWallet } },
-    create: { fromWallet, toWallet, score, comment, weight, signature: `trusted:saidprotocol:${Date.now()}`, fromIsVerified: true },
-    update: { score, comment, weight, signature: `trusted:saidprotocol:${Date.now()}` }
+  // One peer row per pair (see the agents door) — admin writes count as peer rows.
+  const existingPeer = await prisma.feedback.findFirst({
+    where: { fromWallet, toWallet, sourceKey: null },
   });
+  const feedback = existingPeer
+    ? await prisma.feedback.update({
+        where: { id: existingPeer.id },
+        data: { score, comment, weight, signature: `trusted:saidprotocol:${Date.now()}` },
+      })
+    : await prisma.feedback.create({
+        data: { fromWallet, toWallet, score, comment, weight, signature: `trusted:saidprotocol:${Date.now()}`, fromIsVerified: true },
+      });
   // Recalculate reputation score using Bayesian prior
   const allFeedback = await prisma.feedback.findMany({ where: { toWallet }, select: { score: true, weight: true } });
   const newScore = computeReputationScore(allFeedback);
@@ -7916,7 +8039,9 @@ app.post('/admin/feedback', async (c) => {
 app.post('/admin/delete-feedback', async (c) => {
   if (!checkAdminAuth(c)) return c.notFound();
   const { fromWallet, toWallet } = await c.req.json();
-  await prisma.feedback.delete({ where: { fromWallet_toWallet: { fromWallet, toWallet } } });
+  // Removes every row for the pair — peer feedback AND partner outcome rows
+  // (this is the abuse-cleanup tool; deleteMany is a no-op when nothing matches).
+  await prisma.feedback.deleteMany({ where: { fromWallet, toWallet } });
   const allFeedback = await prisma.feedback.findMany({ where: { toWallet }, select: { score: true, weight: true } });
   const newScore = computeReputationScore(allFeedback);
   await prisma.agent.update({ where: { wallet: toWallet }, data: { reputationScore: newScore } });
