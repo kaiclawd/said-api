@@ -100,10 +100,19 @@ model Feedback {
   signature   String   // Wallet signature proving authenticity
   fromIsVerified Boolean @default(false) // Was giver verified at time of feedback?
   txHash      String?  // On-chain hash if stored on-chain
-  
+
+  // Idempotency key for partner-submitted outcome rows (`src:<partner>:<externalId>`),
+  // written by main's POST /api/outcomes/batch. Null for peer feedback. Kept in
+  // sync with main: partners write one row per OUTCOME, so the old
+  // @@unique([fromWallet, toWallet]) must stay dropped here too — a db push from
+  // this branch re-adding it would delete partner outcome rows under
+  // --accept-data-loss. The backfill emits one event per row (`fb:<id>`), so
+  // multiple rows per pair are safe.
+  sourceKey   String?  @unique
+
   createdAt   DateTime @default(now())
 
-  @@unique([fromWallet, toWallet])
+  @@index([fromWallet, toWallet])
   @@index([toWallet])
   @@index([score])
 }
