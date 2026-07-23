@@ -41,6 +41,7 @@ import {
 } from './services/wallet-activity.js';
 import { fetchFairScaleScore } from './score-engine.js';
 import { computeTrustScore } from './scoring/trust-score.js';
+import { createEnforcementRouter } from './enforcement.js';
 
 /**
  * Compute reputationScore from raw feedback rows using a Bayesian
@@ -305,6 +306,50 @@ app.get('/openapi.json', (c) => {
     },
     servers: [{ url: 'https://api.saidprotocol.com' }],
     paths: {
+      '/api/enforcement/{wallet}': {
+        get: {
+          summary: 'Get on-chain enforcement status (staking/slashing) for an agent',
+          description: 'Returns staking amount, slash history, risk assessment, and enforcement tier. This is SAID Protocol\'s unique differentiator — economic enforcement data that no other agent trust protocol provides.',
+          operationId: 'getEnforcementStatus',
+          parameters: [
+            { name: 'wallet', in: 'path', required: true, schema: { type: 'string' }, description: 'Agent wallet address' },
+          ],
+          responses: {
+            '200': { description: 'Enforcement status with staking, slashing, and risk data' },
+            '400': { description: 'Invalid wallet address' },
+            '500': { description: 'Query failed' },
+          },
+        },
+      },
+      '/api/enforcement/batch': {
+        post: {
+          summary: 'Batch query enforcement status for multiple agents',
+          description: 'Check staking/slashing status for up to 25 wallets in one call. Returns summary stats including total staked SOL.',
+          operationId: 'batchEnforcementCheck',
+          requestBody: {
+            required: true,
+            content: { 'application/json': { schema: { type: 'object', properties: { wallets: { type: 'array', items: { type: 'string' }, maxItems: 25 } } } } },
+          },
+          responses: {
+            '200': { description: 'Batch results with summary' },
+            '400': { description: 'Invalid request' },
+          },
+        },
+      },
+      '/api/enforcement/{wallet}/stake': {
+        get: {
+          summary: 'Get staking data only (lightweight)',
+          description: 'Returns just the stake amount, cooldown status, and slash flag. Faster than the full enforcement endpoint.',
+          operationId: 'getStakeStatus',
+          parameters: [
+            { name: 'wallet', in: 'path', required: true, schema: { type: 'string' }, description: 'Agent wallet address' },
+          ],
+          responses: {
+            '200': { description: 'Stake data' },
+            '400': { description: 'Invalid wallet address' },
+          },
+        },
+      },
       '/xchain/message': {
         post: {
           summary: 'Send a cross-chain message between AI agents',
@@ -353,7 +398,7 @@ app.get('/openapi.json', (c) => {
   });
 });
 
-app.get('/health', (c) => c.json({ status: 'healthy' }));
+app.get('/health', (c) => c.json({ status: 'healthy', enforcement: 'live' }));
 
 // ============ AVATAR GENERATOR ============
 
@@ -6219,6 +6264,24 @@ app.get('/api/verify/:wallet', async (c) => {
   // Compute detailed trust score (v0.6 overlay — retained during coexistence)
   const trustScore = computeTrustScore(agent);
 
+  // Fetch on-chain enforcement data (staking/slashing) — non-blocking, best-effort.
+  // This is SAID's unique differentiator: economic enforcement data.
+  let enforcement: { staked: boolean; stakeAmountSol: number; isSlashed: boolean; slashCount: number; enforcementTier: string; riskLevel: string } | null = null;
+  try {
+    const { getEnforcementStatus } = await import('./enforcement.js');
+    const enfStatus = await getEnforcementStatus(connection, wallet);
+    enforcement = {
+      staked: enfStatus.staked,
+      stakeAmountSol: enfStatus.stakeAmountSol,
+      isSlashed: enfStatus.isSlashed,
+      slashCount: enfStatus.slashCount,
+      enforcementTier: enfStatus.enforcementTier,
+      riskLevel: enfStatus.riskLevel,
+    };
+  } catch (e) {
+    console.warn('[/api/verify] Enforcement lookup failed (non-fatal):', e);
+  }
+
   return c.json({
     registered: true,
     verified: agent.isVerified,
@@ -6246,6 +6309,7 @@ app.get('/api/verify/:wallet', async (c) => {
     },
     serviceTypes: agent.serviceTypes,
     skills: agent.skills,
+    enforcement,
     registeredAt: agent.registeredAt.toISOString(),
     urls: {
       profile: `https://www.saidprotocol.com/agents/${wallet}`,
@@ -9055,6 +9119,10 @@ console.log('✅ Cross-Chain Communication endpoints mounted');
 app.route('/api/score', createScoreRoutes(prisma, connection));
 initScoreWorker(prisma, connection);
 console.log('✅ Trust Score engine mounted (GET /api/score/:wallet)');
+
+// Mount Enforcement endpoints (staking/slashing — SAID's unique differentiator)
+app.route('/api/enforcement', createEnforcementRouter(connection));
+console.log('✅ Enforcement endpoints mounted (GET /api/enforcement/:wallet, POST /api/enforcement/batch)');
 
 // Mount Delegated Signing Authority (Privy wallet) routes
 const walletRoutes = createWalletRoutes(prisma, connection, privyClient);
