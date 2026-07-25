@@ -42,6 +42,7 @@ import {
 import { fetchFairScaleScore } from './score-engine.js';
 import { computeTrustScore } from './scoring/trust-score.js';
 import { createEnforcementRouter } from './enforcement.js';
+import { createTrustCrisisRouter } from './trust-crisis.js';
 
 /**
  * Compute reputationScore from raw feedback rows using a Bayesian
@@ -347,6 +348,31 @@ app.get('/openapi.json', (c) => {
           responses: {
             '200': { description: 'Stake data' },
             '400': { description: 'Invalid wallet address' },
+          },
+        },
+      },
+      '/api/trust-crisis': {
+        get: {
+          summary: 'Get the ERC-8004 Trust Crisis research context',
+          description: 'Returns findings from the arXiv study proving ERC-8004 reputation is Sybil-manipulated, and explains SAID\'s economic enforcement alternative.',
+          operationId: 'getTrustCrisisContext',
+          responses: {
+            '200': { description: 'Trust crisis research context' },
+          },
+        },
+      },
+      '/api/trust-crisis/{wallet}': {
+        get: {
+          summary: 'Get trust crisis report for an agent',
+          description: 'Compares economic enforcement data (staking/slashing) against reputation signals for any wallet. Returns a trust verdict that distinguishes real economic trust from Sybil-vulnerable reputation scores. Based on arXiv:2607.08084.',
+          operationId: 'getTrustCrisisReport',
+          parameters: [
+            { name: 'wallet', in: 'path', required: true, schema: { type: 'string' }, description: 'Agent wallet address' },
+          ],
+          responses: {
+            '200': { description: 'Trust crisis report with economic trust verdict' },
+            '400': { description: 'Invalid wallet address' },
+            '500': { description: 'Failed to generate report' },
           },
         },
       },
@@ -9123,6 +9149,48 @@ console.log('✅ Trust Score engine mounted (GET /api/score/:wallet)');
 // Mount Enforcement endpoints (staking/slashing — SAID's unique differentiator)
 app.route('/api/enforcement', createEnforcementRouter(connection));
 console.log('✅ Enforcement endpoints mounted (GET /api/enforcement/:wallet, POST /api/enforcement/batch)');
+
+// Mount Trust Crisis endpoint (ERC-8004 comparison + economic trust verdict)
+app.route(
+  '/api/trust-crisis',
+  createTrustCrisisRouter(connection, async (wallet: string) => {
+    const agent = await prisma.agent.findUnique({
+      where: { wallet },
+      include: {
+        _count: { select: { feedbackReceived: true } },
+        trustScore: true,
+      },
+    });
+
+    if (!agent) {
+      return {
+        feedbackCount: 0,
+        reputationScore: null,
+        bayesianScore: null,
+        trustScore: null,
+      };
+    }
+
+    // Try reputation v0.8
+    let v8Score: number | null = null;
+    try {
+      const rep = await getV8Reputation(prisma, wallet);
+      if (rep.found) {
+        v8Score = Number((rep.compositeScore * 100).toFixed(1));
+      }
+    } catch {
+      // fall through to stored score
+    }
+
+    return {
+      feedbackCount: agent._count.feedbackReceived,
+      reputationScore: agent.reputationScore ?? v8Score,
+      bayesianScore: v8Score,
+      trustScore: agent.trustScore?.score ?? null,
+    };
+  }),
+);
+console.log('✅ Trust Crisis endpoint mounted (GET /api/trust-crisis/:wallet)');
 
 // Mount Delegated Signing Authority (Privy wallet) routes
 const walletRoutes = createWalletRoutes(prisma, connection, privyClient);
