@@ -332,6 +332,34 @@ type Variables = {
   userAgentIds: string[];
 };
 
+/**
+ * Real ownership check for privileged agent operations (API keys, wallet
+ * upgrades, wallet reads).
+ *
+ * A UserAgent row is NOT proof of ownership: POST /users/me/agents lets any
+ * authenticated user assert a link to any agent, with no signature. Treating
+ * that as ownership meant "You do not own this agent" was checking a claim the
+ * caller made about themselves — and it gated API-key minting, which carries
+ * transaction scope. Authority now comes from the agent's on-chain owner.
+ *
+ * The link table is still consulted, but only as a NECESSARY condition
+ * alongside control of the on-chain owner wallet.
+ */
+async function userControlsAgent(
+  prisma: PrismaClient,
+  userId: string,
+  agent: { wallet: string; owner: string },
+): Promise<boolean> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { walletAddress: true },
+  });
+  if (!user?.walletAddress) return false;
+  // The caller must control the wallet the chain says owns this agent, or the
+  // agent's own wallet.
+  return user.walletAddress === agent.owner || user.walletAddress === agent.wallet;
+}
+
 export function createWalletRoutes(prisma: PrismaClient, connection: Connection, privyClient?: any) {
   const app = new Hono<{ Variables: Variables }>();
   const privyWallets = new PrivyWalletService(privyClient);
@@ -360,7 +388,8 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection,
     
     // Verify caller owns this agent
     const userAgentIds = c.get('userAgentIds') as string[];
-    if (!userAgentIds.includes(agent.wallet)) {
+    const userId = c.get('userId') as string;
+    if (!userAgentIds.includes(agent.wallet) || !(await userControlsAgent(prisma, userId, agent))) {
       return c.json({ error: 'You do not own this agent' }, 403);
     }
     
@@ -490,7 +519,8 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection,
     
     // Verify caller owns this agent
     const userAgentIds = c.get('userAgentIds') as string[];
-    if (!userAgentIds.includes(agent.wallet)) {
+    const userId = c.get('userId') as string;
+    if (!userAgentIds.includes(agent.wallet) || !(await userControlsAgent(prisma, userId, agent))) {
       return c.json({ error: 'You do not own this agent' }, 403);
     }
     
@@ -976,7 +1006,8 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection,
     
     // Verify caller owns this agent
     const userAgentIds = c.get('userAgentIds') as string[];
-    if (!userAgentIds.includes(agent.wallet)) {
+    const userId = c.get('userId') as string;
+    if (!userAgentIds.includes(agent.wallet) || !(await userControlsAgent(prisma, userId, agent))) {
       return c.json({ error: 'You do not own this agent' }, 403);
     }
     
@@ -1137,7 +1168,8 @@ export function createWalletRoutes(prisma: PrismaClient, connection: Connection,
     }
     
     const userAgentIds = c.get('userAgentIds') as string[];
-    if (!userAgentIds.includes(agent.wallet)) {
+    const userId = c.get('userId') as string;
+    if (!userAgentIds.includes(agent.wallet) || !(await userControlsAgent(prisma, userId, agent))) {
       return c.json({ error: 'You do not own this agent' }, 403);
     }
     
