@@ -32,6 +32,7 @@ import {
 import {
   evaluateDisqualifiers,
   applyDisqualification,
+  encodeDisqualification,
   type Disqualification,
   type LaunchPortfolio,
 } from '../src/reputation-v0.8/disqualifiers.js';
@@ -144,7 +145,7 @@ async function run() {
         // Carry the disqualification reason alongside the evidence so the
         // demotion is explainable wherever the posterior row is read.
         topSourcesJson: (dq
-          ? { disqualified: dq.code, reason: dq.reason, evidence: ax.topEvidence }
+          ? encodeDisqualification(dq, ax.topEvidence)
           : ax.topEvidence) as never,
         sampleSize: Math.round(ax.effectiveSamples),
       });

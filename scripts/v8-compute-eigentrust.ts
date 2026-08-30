@@ -35,6 +35,7 @@ import {
 } from '../src/reputation-v0.8/graph.js';
 import { applyCocmDiscount, type RawEdge } from '../src/reputation-v0.8/cocm.js';
 import { compositeFromMeans, applyGraphBonus, assignTier, GRAPH_BONUS_WEIGHT } from '../src/reputation-v0.8/posteriors.js';
+import { decodeDisqualification } from '../src/reputation-v0.8/disqualifiers.js';
 import { AXES, type Axis } from '../src/reputation-v0.8/axes.js';
 
 const prisma = new PrismaClient();
@@ -152,14 +153,27 @@ async function run() {
   // idempotently (re-deriving from means avoids compounding the bonus on
   // re-runs; the stored compositeScore already includes any prior bonus).
   const meansBySubject = new Map<string, Partial<Record<Axis, number>>>();
+  // Disqualification caps must be re-applied here. Re-deriving the composite
+  // from per-axis means bypasses the cap the posteriors pass wrote, because
+  // the cap lands on compositeScore and never on the means themselves — so
+  // without this the graph bonus silently un-demotes a disqualified agent
+  // two steps later in the same chain. (Same failure the launch tier-floor
+  // is guarded against.) The posteriors pass stays the single decider of WHO
+  // is disqualified; we only respect what it recorded.
+  const capBySubject = new Map<string, number>();
   if (GRAPH_BONUS > 0) {
     const meanRows = await prisma.reputationPosterior.findMany({
-      select: { subjectWallet: true, axis: true, posteriorMean: true },
+      select: { subjectWallet: true, axis: true, posteriorMean: true, topSourcesJson: true },
     });
     for (const r of meanRows) {
       const m = meansBySubject.get(r.subjectWallet) ?? {};
       m[r.axis as Axis] = r.posteriorMean;
       meansBySubject.set(r.subjectWallet, m);
+      const dq = decodeDisqualification(r.topSourcesJson);
+      if (dq) capBySubject.set(r.subjectWallet, dq.cap);
+    }
+    if (capBySubject.size > 0) {
+      console.log(`Disqualification caps to preserve through the graph bonus: ${capBySubject.size}`);
     }
   }
 
@@ -178,7 +192,9 @@ async function run() {
     const data: { eigentrustScore: number; compositeScore?: number } = { eigentrustScore: normalized };
     if (GRAPH_BONUS > 0) {
       const base = compositeFromMeans(meansBySubject.get(wallet) ?? {});
-      data.compositeScore = applyGraphBonus(base, normalized, GRAPH_BONUS);
+      const withBonus = applyGraphBonus(base, normalized, GRAPH_BONUS);
+      const cap = capBySubject.get(wallet);
+      data.compositeScore = cap === undefined ? withBonus : Math.min(withBonus, cap);
     }
     const r = await prisma.reputationPosterior.updateMany({
       where: { subjectWallet: wallet },

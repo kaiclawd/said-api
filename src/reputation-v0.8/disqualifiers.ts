@@ -115,3 +115,30 @@ export function applyDisqualification(
 ): number {
   return d ? Math.min(composite, d.cap) : composite;
 }
+
+// ── Persisted form ──────────────────────────────────────────────────
+// A disqualification is written into ReputationPosterior.topSourcesJson (an
+// existing Json column — see the read path for why we avoid a migration).
+// Encode/decode live here so every consumer — the posteriors writer, the
+// eigentrust pass that later rewrites compositeScore, and the API read path —
+// agrees on one shape instead of each re-deriving it.
+export interface StoredDisqualification {
+  code: string;
+  reason: string;
+  cap: number;
+}
+
+export function encodeDisqualification(d: Disqualification, evidence: unknown): Record<string, unknown> {
+  return { disqualified: d.code, reason: d.reason, cap: d.cap, evidence };
+}
+
+export function decodeDisqualification(json: unknown): StoredDisqualification | null {
+  if (!json || typeof json !== 'object' || Array.isArray(json)) return null;
+  const o = json as Record<string, unknown>;
+  if (typeof o.disqualified !== 'string' || typeof o.reason !== 'string') return null;
+  // `cap` was added after the first deploy; fall back to the current default
+  // so rows written by the earlier build still demote rather than silently
+  // reading as un-capped.
+  const cap = typeof o.cap === 'number' ? o.cap : DISQUALIFY_COMPOSITE_CAP;
+  return { code: o.disqualified, reason: o.reason, cap };
+}
