@@ -45,14 +45,19 @@ export interface EmitEventInput {
 
 export interface EmitResult {
   emitted: boolean;        // true if we wrote a new row, false if sourceKey was already present
+  updated?: boolean;       // true if an existing MUTABLE event was re-scored in place
   eventId: string | null;  // id of the new (or existing) row, null on dry-run
 }
 
 /**
  * Write a single reputation event. Idempotent on `sourceKey`.
  *
- * If a row with the same sourceKey already exists, this is a no-op and
- * returns { emitted: false, eventId: <existing> }.
+ * If a row with the same sourceKey already exists:
+ *   - immutable kinds (the default) are a no-op   -> { emitted: false }
+ *   - MUTABLE kinds are re-scored in place        -> { emitted: false, updated: true }
+ *
+ * Mutability is a property of the KIND, not the caller (see kinds.ts).
+ * Facts are write-once; outcomes are re-derived from current world state.
  */
 export async function emitEvent(
   prisma: PrismaClient,
@@ -67,13 +72,25 @@ export async function emitEvent(
   const polarity: Polarity = input.polarity ?? spec.polarity;
   const weight: number = input.weight ?? spec.defaultWeight;
 
-  // Fast path: if a row with this sourceKey already exists, do nothing.
+  // If a row with this sourceKey already exists: no-op for immutable
+  // kinds, re-score in place for mutable ones.
   const existing = await prisma.reputationEvent.findUnique({
     where: { sourceKey: input.sourceKey },
-    select: { id: true },
+    select: { id: true, weight: true },
   });
   if (existing) {
-    return { emitted: false, eventId: existing.id };
+    // EVENT_KINDS is a const literal, so `mutable` is only present on the
+    // members that declare it — read it through the spec interface.
+    const isMutable = (spec as { mutable?: boolean }).mutable === true;
+    if (!isMutable) return { emitted: false, eventId: existing.id };
+    // Only write when the re-derived weight actually moved, so an
+    // unchanged corpus stays cheap and `updatedAt` semantics stay honest.
+    if (existing.weight === weight) return { emitted: false, eventId: existing.id };
+    await prisma.reputationEvent.update({
+      where: { id: existing.id },
+      data: { weight, polarity, axis, metadata: input.metadata as never },
+    });
+    return { emitted: false, updated: true, eventId: existing.id };
   }
 
   const row = await prisma.reputationEvent.create({

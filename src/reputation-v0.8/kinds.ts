@@ -32,6 +32,16 @@ export interface EventKindSpec {
   // signals with no decay; activity events contribute to behavior signals
   // with decay.
   structural: boolean;
+  /**
+   * Whether this event represents an evolving OUTCOME rather than an
+   * immutable fact. Immutable facts (registered, verified, a payment that
+   * happened) are write-once: re-emitting must be a no-op. Outcomes (did
+   * the launched token survive?) are re-derived from current world state
+   * on every backfill, so their weight MUST be updated in place — freezing
+   * them at first detection is a category error, and it is what let a
+   * serial junk launcher out-score a real success. Defaults to false.
+   */
+  mutable?: boolean;
   description: string;
 }
 
@@ -107,6 +117,9 @@ export const EVENT_KINDS = {
     polarity: 1,
     defaultWeight: 1.0,
     structural: false,
+    // The token's fate keeps changing after we first see it: it can grow
+    // past the survival bar, or collapse. Re-scored every backfill.
+    mutable: true,
     description: 'Agent launched a token (raw signal; weight scaled by market cap)',
   },
 

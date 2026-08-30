@@ -43,6 +43,8 @@ interface BackfillCounts {
   scanned: number;
   emitted: number;
   skipped: number;
+  /** Mutable events (see kinds.ts) whose weight was re-derived and rewritten. */
+  updated?: number;
 }
 
 function only(name: string): boolean {
@@ -225,7 +227,16 @@ async function backfillLaunchedToken(): Promise<BackfillCounts> {
     const survived =
       LAUNCH_SURVIVAL_ENABLED && mc >= LAUNCH_SURVIVAL_MIN_USD! && ageDays >= LAUNCH_SUSTAIN_DAYS!;
     let weight: number;
-    if (!survived) weight = 0.3;                                            // too young to prove out, or dead
+    // Unproven (too young) and failed (dead) launches earn NOTHING.
+    //
+    // This used to be 0.3, which made LAUNCHING JUNK PROFITABLE: delivery
+    // credit accumulated at 0.3 per launch with no quality gate, so ~20 dead
+    // tokens out-earned one genuine $1M success (measured: a serial launcher
+    // with 25 worthless tokens scored 7.50 delivery weight vs 6.00 for a real
+    // survivor). Attempts are not achievements — only outcomes count. Because
+    // token_launched is now mutable, a young token that later proves out is
+    // upgraded on the next backfill rather than being written off.
+    if (!survived) weight = 0;                                              // too young to prove out, or dead
     else if (LAUNCH_PLATINUM_FLOOR_USD !== null && mc >= LAUNCH_PLATINUM_FLOOR_USD) weight = 10.0; // exceptional
     else if (LAUNCH_GOLD_FLOOR_USD !== null && mc >= LAUNCH_GOLD_FLOOR_USD) weight = 6.0;          // rare in this market
     else if (LAUNCH_MID_USD !== null && mc >= LAUNCH_MID_USD) weight = 3.0;                        // solid survivor
@@ -240,7 +251,9 @@ async function backfillLaunchedToken(): Promise<BackfillCounts> {
       occurredAt: launchedAt,
       metadata: { mint: tok.mint, marketCapUsd: mc, ageDays: Math.round(ageDays), survived },
     });
-    r.emitted ? counts.emitted++ : counts.skipped++;
+    if (r.emitted) counts.emitted++;
+    else if (r.updated) counts.updated = (counts.updated ?? 0) + 1;
+    else counts.skipped++;
   }
   return counts;
 }
@@ -487,17 +500,25 @@ async function run() {
 
   const elapsed = Math.round((Date.now() - startedAt) / 1000);
   console.log(`\nDone in ${elapsed}s.\n`);
-  console.log(`${'source'.padEnd(18)} ${'scanned'.padStart(8)} ${'emitted'.padStart(8)} ${'skipped'.padStart(8)}`);
+  console.log(
+    `${'source'.padEnd(18)} ${'scanned'.padStart(8)} ${'emitted'.padStart(8)} ${'updated'.padStart(8)} ${'skipped'.padStart(8)}`,
+  );
   let totalEmitted = 0;
+  let totalUpdated = 0;
   let totalSkipped = 0;
   for (const r of results) {
     console.log(
-      `${r.source.padEnd(18)} ${String(r.scanned).padStart(8)} ${String(r.emitted).padStart(8)} ${String(r.skipped).padStart(8)}`,
+      `${r.source.padEnd(18)} ${String(r.scanned).padStart(8)} ${String(r.emitted).padStart(8)} ` +
+        `${String(r.updated ?? 0).padStart(8)} ${String(r.skipped).padStart(8)}`,
     );
     totalEmitted += r.emitted;
+    totalUpdated += r.updated ?? 0;
     totalSkipped += r.skipped;
   }
-  console.log(`${'TOTAL'.padEnd(18)} ${''.padStart(8)} ${String(totalEmitted).padStart(8)} ${String(totalSkipped).padStart(8)}`);
+  console.log(
+    `${'TOTAL'.padEnd(18)} ${''.padStart(8)} ${String(totalEmitted).padStart(8)} ` +
+      `${String(totalUpdated).padStart(8)} ${String(totalSkipped).padStart(8)}`,
+  );
 
   // Show what the corpus looks like now by kind + axis
   const byKind = await prisma.reputationEvent.groupBy({

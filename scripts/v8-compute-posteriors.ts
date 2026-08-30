@@ -24,9 +24,17 @@ import { AXES, type Axis } from '../src/reputation-v0.8/axes.js';
 import {
   LAUNCH_GOLD_FLOOR_USD,
   LAUNCH_PLATINUM_FLOOR_USD,
+  LAUNCH_SURVIVAL_MIN_USD,
   LAUNCH_SUSTAIN_DAYS,
   LAUNCH_FLOOR_ENABLED,
+  LAUNCH_SURVIVAL_ENABLED,
 } from '../src/reputation-v0.8/economics-env.js';
+import {
+  evaluateDisqualifiers,
+  applyDisqualification,
+  type Disqualification,
+  type LaunchPortfolio,
+} from '../src/reputation-v0.8/disqualifiers.js';
 
 const prisma = new PrismaClient();
 const WALLET = process.env.WALLET ?? null;
@@ -69,6 +77,43 @@ async function run() {
   }
   console.log(`Computing posteriors for ${bySubject.size} subjects...\n`);
 
+  // ── Disqualifiers (policy layer) ──────────────────────────────────
+  // Built BEFORE the compute loop because the cap must be applied to the
+  // composite we PERSIST — ReputationPosterior stores compositeScore and
+  // the live API derives the served tier from it, so capping here is what
+  // actually demotes the agent everywhere.
+  const disqualified = new Map<string, Disqualification>();
+  if (!LAUNCH_SURVIVAL_ENABLED) {
+    console.log('Disqualifiers: SKIPPED (survival thresholds unset — cannot define a survivor).\n');
+  } else {
+    const DAY = 24 * 60 * 60 * 1000;
+    const launches = await prisma.launchedToken.findMany({
+      select: { agentWallet: true, marketCapUsd: true, launchedAt: true, detectedAt: true },
+    });
+    const portfolios = new Map<string, LaunchPortfolio>();
+    for (const t of launches) {
+      const p = portfolios.get(t.agentWallet) ?? { total: 0, survivors: 0 };
+      p.total++;
+      const ageDays = (Date.now() - (t.launchedAt ?? t.detectedAt).getTime()) / DAY;
+      // Same definition of "survived" the backfill scores against.
+      if ((t.marketCapUsd ?? 0) >= LAUNCH_SURVIVAL_MIN_USD! && ageDays >= LAUNCH_SUSTAIN_DAYS!) {
+        p.survivors++;
+      }
+      portfolios.set(t.agentWallet, p);
+    }
+    for (const [wallet, launchPortfolio] of portfolios) {
+      const d = evaluateDisqualifiers({ launches: launchPortfolio });
+      if (d) disqualified.set(wallet, d);
+    }
+    console.log(
+      `Disqualifiers: ${disqualified.size} agent(s) disqualified out of ${portfolios.size} with launches.`,
+    );
+    for (const [wallet, d] of disqualified) {
+      console.log(`  ${wallet}  [${d.code}] ${d.reason} -> composite capped at ${d.cap}`);
+    }
+    console.log();
+  }
+
   // Compute per-agent + accumulate into bulk-insert payload
   const allRows: any[] = [];
   const composites: Array<{ wallet: string; composite: number; samples: number; tier: string }> = [];
@@ -76,6 +121,12 @@ async function run() {
 
   for (const [wallet, subjectSignals] of bySubject) {
     const result = computeAgentPosteriors(wallet, subjectSignals);
+
+    // Policy layer: a disqualification vetoes the blended score. Applied
+    // to the persisted composite so every downstream reader inherits it.
+    const dq = disqualified.get(wallet) ?? null;
+    const composite = applyDisqualification(result.compositeScore, dq);
+    const tier = dq ? 'flagged' : result.tier;
 
     for (const axis of AXES) {
       const ax = result.axes[axis];
@@ -89,17 +140,21 @@ async function run() {
         lowerBound95: ax.lowerBound95,
         eigentrustScore: 0, // Phase 3
         hittingTimeScore: null,
-        compositeScore: result.compositeScore,
-        topSourcesJson: ax.topEvidence as never,
+        compositeScore: composite,
+        // Carry the disqualification reason alongside the evidence so the
+        // demotion is explainable wherever the posterior row is read.
+        topSourcesJson: (dq
+          ? { disqualified: dq.code, reason: dq.reason, evidence: ax.topEvidence }
+          : ax.topEvidence) as never,
         sampleSize: Math.round(ax.effectiveSamples),
       });
     }
 
     composites.push({
       wallet,
-      composite: result.compositeScore,
+      composite,
       samples: result.totalSamples,
-      tier: result.tier,
+      tier,
     });
 
     processed++;
@@ -152,6 +207,9 @@ async function run() {
     const RANK: Record<string, number> = { unranked: 0, bronze: 1, silver: 2, gold: 3, platinum: 4 };
     let floored = 0;
     for (const c of composites) {
+      // A disqualified agent is never floored back up — otherwise the
+      // sustained-launch floor silently undoes the veto.
+      if (disqualified.has(c.wallet)) continue;
       const floor = platFloor.has(c.wallet) ? 'platinum' : goldFloor.has(c.wallet) ? 'gold' : null;
       if (floor && RANK[c.tier] < RANK[floor]) {
         c.tier = floor;
@@ -167,11 +225,11 @@ async function run() {
 
   console.log('── Tier distribution ───────────────────────────');
   const tierCounts: Record<string, number> = {
-    platinum: 0, gold: 0, silver: 0, bronze: 0, unranked: 0,
+    platinum: 0, gold: 0, silver: 0, bronze: 0, unranked: 0, flagged: 0,
   };
-  for (const c of composites) tierCounts[c.tier]++;
+  for (const c of composites) tierCounts[c.tier] = (tierCounts[c.tier] ?? 0) + 1;
   const total = composites.length;
-  for (const t of ['platinum', 'gold', 'silver', 'bronze', 'unranked']) {
+  for (const t of ['platinum', 'gold', 'silver', 'bronze', 'unranked', 'flagged']) {
     const n = tierCounts[t];
     const pct = ((n / total) * 100).toFixed(1);
     console.log(`  ${t.padEnd(10)} ${String(n).padStart(5)} (${pct}%)`);
