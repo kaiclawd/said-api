@@ -33,11 +33,17 @@ export interface V8Reputation {
   wallet: string;
   found: boolean; // false → no posterior rows yet (unscored / too new)
   compositeScore: number; // 0–1, includes the Phase 3c graph bonus
-  tier: Tier; // unranked | bronze | silver | gold | platinum
+  tier: Tier; // unranked | bronze | silver | gold | platinum | flagged
   totalSamples: number;
   eigentrustScore: number;
   axes: Partial<Record<Axis, V8AxisView>>;
   computedAt: Date | null;
+  /**
+   * Present only when the agent has been disqualified. `reason` states a
+   * verifiable fact ("25 tokens launched, 0 still above the survival
+   * floor"), never an inference about intent — we publish what we measured.
+   */
+  disqualified?: { code: string; reason: string };
 }
 
 const UNRANKED = (wallet: string): V8Reputation => ({
@@ -60,6 +66,7 @@ interface PostRow {
   compositeScore: number;
   eigentrustScore: number;
   computedAt: Date | null;
+  topSourcesJson: unknown;
 }
 
 const POST_SELECT = {
@@ -70,7 +77,38 @@ const POST_SELECT = {
   compositeScore: true,
   eigentrustScore: true,
   computedAt: true,
+  topSourcesJson: true,
 } as const;
+
+// ── Disqualification ────────────────────────────────────────────────
+// The compute pipeline caps a disqualified agent's persisted composite and
+// records why inside topSourcesJson (an existing Json column — deliberately
+// no schema change, since API and cron both deploy with
+// `db push --accept-data-loss` and a new column would have to land on both
+// branches at once).
+//
+// We surface it as a distinct `flagged` tier rather than letting the capped
+// score fall through to `unranked`. A capped composite of 0.25 sits below
+// the bronze floor, so without this an agent we deliberately demoted would
+// render identically to one we simply have no data on — which is the one
+// outcome a trust layer must not produce.
+interface DisqualificationView {
+  code: string;
+  reason: string;
+}
+
+function readDisqualification(rows: PostRow[]): DisqualificationView | null {
+  for (const r of rows) {
+    const j = r.topSourcesJson;
+    if (j && typeof j === 'object' && !Array.isArray(j)) {
+      const o = j as Record<string, unknown>;
+      if (typeof o.disqualified === 'string' && typeof o.reason === 'string') {
+        return { code: o.disqualified, reason: o.reason };
+      }
+    }
+  }
+  return null;
+}
 
 // ── Sustained-launch tier-floor ─────────────────────────────────────
 // A launched token still alive at high market cap ≥21 days later is strong,
@@ -81,6 +119,11 @@ const POST_SELECT = {
 // The mcap bars + age gate are env-driven and DISABLED when unset — the
 // exact tuning values are kept out of source. See economics-env.ts.
 const TIER_RANK: Record<Tier, number> = {
+  // `flagged` ranks below unranked: a disqualified agent must never be
+  // floored up by the launch floor. (It never reaches the comparison —
+  // buildFromRows returns early on disqualification — but the ordering is
+  // stated explicitly so a future caller can't accidentally promote one.)
+  flagged: -1,
   unranked: 0,
   bronze: 1,
   silver: 2,
@@ -135,6 +178,23 @@ function buildFromRows(wallet: string, rows: PostRow[], floor: Tier | null = nul
         sampleSize: r.sampleSize,
       };
     }
+  }
+
+  // A disqualification is a veto: it outranks both the evidence blend and
+  // the sustained-launch floor below, so we return before either applies.
+  const disqualified = readDisqualification(rows);
+  if (disqualified) {
+    return {
+      wallet,
+      found: true,
+      compositeScore,
+      tier: 'flagged',
+      totalSamples,
+      eigentrustScore,
+      axes,
+      computedAt,
+      disqualified,
+    };
   }
 
   let tier = assignTier(compositeScore, totalSamples, identityMean);
