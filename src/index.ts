@@ -666,28 +666,21 @@ app.post('/api/agents/:wallet/feedback', async (c) => {
     ? `[${source}] ${comment || ''}`.trim()
     : comment;
 
-  // Upsert feedback (one per fromWallet->toWallet pair)
-  const feedback = await prisma.feedback.upsert({
-    where: {
-      fromWallet_toWallet: { fromWallet, toWallet }
-    },
-    create: {
-      fromWallet,
-      toWallet,
-      score,
-      comment: fullComment,
-      signature,
-      weight,
-      fromIsVerified,
-    },
-    update: {
-      score,
-      comment: fullComment,
-      signature,
-      weight,
-      fromIsVerified,
-    }
+  // One peer-feedback row per fromWallet->toWallet pair, enforced here in code:
+  // partner outcome rows (sourceKey != null) share this table and may repeat
+  // pairs, so the old DB-level @@unique is gone. A concurrent duplicate here is
+  // signature-gated and bounded by the 5-minute replay window — acceptable.
+  const existingPeer = await prisma.feedback.findFirst({
+    where: { fromWallet, toWallet, sourceKey: null },
   });
+  const feedback = existingPeer
+    ? await prisma.feedback.update({
+        where: { id: existingPeer.id },
+        data: { score, comment: fullComment, signature, weight, fromIsVerified },
+      })
+    : await prisma.feedback.create({
+        data: { fromWallet, toWallet, score, comment: fullComment, signature, weight, fromIsVerified },
+      });
   
   // Recalculate weighted reputation
   const allFeedback = await prisma.feedback.findMany({
@@ -7411,11 +7404,18 @@ app.post('/admin/feedback', async (c) => {
   if (!targetAgent) return c.json({ error: 'Agent not found' }, 404);
   const fromAgent = await prisma.agent.findUnique({ where: { wallet: fromWallet } });
   const weight = fromAgent?.isVerified ? 2.0 : 1.5;
-  const feedback = await prisma.feedback.upsert({
-    where: { fromWallet_toWallet: { fromWallet, toWallet } },
-    create: { fromWallet, toWallet, score, comment, weight, signature: `trusted:saidprotocol:${Date.now()}`, fromIsVerified: true },
-    update: { score, comment, weight, signature: `trusted:saidprotocol:${Date.now()}` }
+  // One peer row per pair (see the agents door) — admin writes count as peer rows.
+  const existingPeer = await prisma.feedback.findFirst({
+    where: { fromWallet, toWallet, sourceKey: null },
   });
+  const feedback = existingPeer
+    ? await prisma.feedback.update({
+        where: { id: existingPeer.id },
+        data: { score, comment, weight, signature: `trusted:saidprotocol:${Date.now()}` },
+      })
+    : await prisma.feedback.create({
+        data: { fromWallet, toWallet, score, comment, weight, signature: `trusted:saidprotocol:${Date.now()}`, fromIsVerified: true },
+      });
   // Recalculate reputation score using Bayesian prior
   const allFeedback = await prisma.feedback.findMany({ where: { toWallet }, select: { score: true, weight: true } });
   const newScore = computeReputationScore(allFeedback);
@@ -7426,7 +7426,9 @@ app.post('/admin/feedback', async (c) => {
 app.post('/admin/delete-feedback', async (c) => {
   if (!checkAdminAuth(c)) return c.notFound();
   const { fromWallet, toWallet } = await c.req.json();
-  await prisma.feedback.delete({ where: { fromWallet_toWallet: { fromWallet, toWallet } } });
+  // Removes every row for the pair — peer feedback AND partner outcome rows
+  // (this is the abuse-cleanup tool; deleteMany is a no-op when nothing matches).
+  await prisma.feedback.deleteMany({ where: { fromWallet, toWallet } });
   const allFeedback = await prisma.feedback.findMany({ where: { toWallet }, select: { score: true, weight: true } });
   const newScore = computeReputationScore(allFeedback);
   await prisma.agent.update({ where: { wallet: toWallet }, data: { reputationScore: newScore } });
