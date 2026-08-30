@@ -681,7 +681,13 @@ app.get('/api/agents', async (c) => {
         ...a,
         reputationScore: Number((rep.compositeScore * 100).toFixed(1)),
         trustScore: { ...TRUSTSCORE_SKELETON, ...(a.trustScore ?? {}), tier: rep.tier, score: v8Score100 },
-        reputation: { tier: rep.tier, compositeScore: Number(rep.compositeScore.toFixed(4)), scored: true },
+        reputation: {
+          tier: rep.tier,
+          compositeScore: Number(rep.compositeScore.toFixed(4)),
+          scored: true,
+          // A `flagged` tier always travels with the verifiable fact behind it.
+          ...(rep.disqualified ? { disqualified: rep.disqualified } : {}),
+        },
       };
     });
   } catch (err) {
@@ -764,6 +770,7 @@ app.get('/api/agents/top', async (c) => {
             compositeScore: Number(rep.compositeScore.toFixed(4)),
             eigentrustScore: Number(rep.eigentrustScore.toFixed(4)),
             scored: true,
+            ...(rep.disqualified ? { disqualified: rep.disqualified } : {}),
           },
         },
         tierRank: TIER_ORDER[rep.tier] ?? 0,
@@ -833,14 +840,24 @@ app.get('/api/agents/:wallet', async (c) => {
   // if the v8 read fails or the agent isn't scored, we keep the v0.6 values.
   let trustScoreOut: any = liveTrustScore;
   let reputationScoreOut = agent.reputationScore;
-  let reputationBlock = { tier: 'unranked', compositeScore: 0, scored: false };
+  let reputationBlock: {
+    tier: string;
+    compositeScore: number;
+    scored: boolean;
+    disqualified?: { code: string; reason: string };
+  } = { tier: 'unranked', compositeScore: 0, scored: false };
   try {
     const rep = await getV8Reputation(prisma, wallet);
     if (rep.found) {
       const v8Score100 = Math.round(rep.compositeScore * 100);
       trustScoreOut = { ...liveTrustScore, tier: rep.tier, score: v8Score100 };
       reputationScoreOut = Number((rep.compositeScore * 100).toFixed(1));
-      reputationBlock = { tier: rep.tier, compositeScore: Number(rep.compositeScore.toFixed(4)), scored: true };
+      reputationBlock = {
+        tier: rep.tier,
+        compositeScore: Number(rep.compositeScore.toFixed(4)),
+        scored: true,
+        ...(rep.disqualified ? { disqualified: rep.disqualified } : {}),
+      };
     }
   } catch (err) {
     console.error('[/api/agents/:wallet] v8 reputation read failed, serving v0.6', wallet, err);
