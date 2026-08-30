@@ -55,7 +55,13 @@ export const TIER_THRESHOLDS = {
   bronze:   { composite: 0.30, samples: 0   },
 } as const;
 
-export type Tier = 'platinum' | 'gold' | 'silver' | 'bronze' | 'unranked';
+/**
+ * `flagged` is not a rung on the ladder — it is a disqualification, applied
+ * by the policy layer after the evidence blend (see the compute pipeline's
+ * disqualifiers.ts). It never comes out of assignTier, only out of a stored
+ * disqualification on the posterior row.
+ */
+export type Tier = 'platinum' | 'gold' | 'silver' | 'bronze' | 'unranked' | 'flagged';
 
 /** Subset of ReputationSignal we need — keeps this module unaware of Prisma. */
 export interface SignalInput {
@@ -273,6 +279,12 @@ export function assignTier(
   totalSamples: number,
   identityPosteriorMean: number,
 ): Tier {
+  // No evidence at all -> UNRANKED, never bronze. An agent sitting exactly
+  // on the prior (composite 0.50, zero samples) is one we know nothing
+  // about; labelling that "bronze" makes the lowest tier mean "unmeasured"
+  // rather than "measured and poor", which is the difference between a
+  // score that discriminates and one that only looks like it does.
+  if (totalSamples <= 0) return 'unranked';
   if (
     composite >= TIER_THRESHOLDS.platinum.composite &&
     totalSamples >= TIER_THRESHOLDS.platinum.samples &&
