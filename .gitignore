@@ -13,3 +13,6 @@ test-keypair-v3.json
 test-paid-v3.ts
 test-paid.ts
 data/
+
+# Dune query result exports (local analysis only; never published)
+dune/local/

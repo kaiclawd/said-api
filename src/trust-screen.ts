@@ -8,9 +8,27 @@
  * Verdicts use *positive-evidence* reputation only — we assert "allow" on an
  * established track record and never fabricate a "block" we have no fraud data
  * for, so "no reputation" maps to "review", not "block".
+ *
+ * Operator-continuity gate: reputation binds to the agent *identity* (the PDA /
+ * wallet), but authority over that identity can transfer to a new controller via
+ * the on-chain `transfer_authority` instruction. A track record earned under a
+ * prior operator should not be vouched for at full strength once the identity has
+ * changed hands — that's the reputation-laundering vector (acquire a high-rep
+ * agent, inherit its trust, behave differently). We surface continuity explicitly
+ * and soft-downgrade an `allow` to `review` when the identity has transferred. We
+ * never block on it — transfers can be benign (key rotation, custody migration).
  */
 import type { PrismaClient } from '@prisma/client';
 import { getV8Reputation } from './reputation-v0.8/read.js';
+
+export interface OperatorIntegrity {
+  // Is the historical reputation continuous with whoever controls the identity now?
+  continuity: 'continuous' | 'transferred' | 'unknown';
+  authorityTransfers: number; // count of transfer_authority instructions seen
+  walletLinkChurn: number; // link+unlink events — secondary instability signal (informational)
+  flags: string[];
+  note: string;
+}
 
 export interface ScreenResult {
   wallet: string;
@@ -24,8 +42,60 @@ export interface ScreenResult {
   reason: string;
   axes: Record<string, { score: number; confidenceFloor: number; signals: number }>;
   eigentrust: number | null;
+  integrity: OperatorIntegrity;
   computedAt: Date | null;
   source: string;
+}
+
+// Minimal slice of AgentSaidEngagement the integrity assessment reads.
+export interface EngagementInput {
+  transferAuthorityCount: number;
+  linkWalletCount: number;
+  unlinkWalletCount: number;
+}
+
+/**
+ * Classify operator continuity from on-chain engagement counters. Pure — no DB —
+ * so the laundering logic is unit-testable in isolation.
+ *
+ * `null` engagement (wallet has no scanned SAID-instruction record) maps to
+ * `unknown`, not `transferred`: on a positive-evidence screen we don't penalize
+ * absent data, we just mark continuity unverified.
+ */
+export function assessOperatorIntegrity(eng: EngagementInput | null): OperatorIntegrity {
+  if (!eng) {
+    return {
+      continuity: 'unknown',
+      authorityTransfers: 0,
+      walletLinkChurn: 0,
+      flags: [],
+      note: 'No on-chain operator-engagement record — identity continuity unverified.',
+    };
+  }
+
+  const authorityTransfers = eng.transferAuthorityCount ?? 0;
+  const walletLinkChurn = (eng.linkWalletCount ?? 0) + (eng.unlinkWalletCount ?? 0);
+  const flags: string[] = [];
+  if (authorityTransfers > 0) flags.push(`authority_transferred_x${authorityTransfers}`);
+  if (walletLinkChurn >= 4) flags.push('high_wallet_link_churn');
+
+  if (authorityTransfers > 0) {
+    return {
+      continuity: 'transferred',
+      authorityTransfers,
+      walletLinkChurn,
+      flags,
+      note: `Authority over this identity has transferred ${authorityTransfers}× — historical reputation may have been earned by a prior controller (reputation-laundering risk).`,
+    };
+  }
+
+  return {
+    continuity: 'continuous',
+    authorityTransfers,
+    walletLinkChurn,
+    flags,
+    note: 'Authority over this identity has not transferred; reputation is continuous with the current controller.',
+  };
 }
 
 const SOURCE_SCORED =
@@ -52,17 +122,30 @@ export async function buildScreenResult(prisma: PrismaClient, wallet: string): P
         'Not a registered SAID agent — no verifiable identity or reputation on record. Verify out-of-band before paying.',
       axes: {},
       eigentrust: null,
+      integrity: assessOperatorIntegrity(null),
       computedAt: null,
       source: 'SAID Protocol reputation v0.8',
     };
   }
 
-  let rep: Awaited<ReturnType<typeof getV8Reputation>> | null = null;
-  try {
-    rep = await getV8Reputation(prisma, wallet);
-  } catch (err) {
-    console.error('[/api/screen] v8 reputation read failed', wallet, err);
-  }
+  // Reputation + operator-engagement read in parallel — the latter drives the
+  // continuity gate below.
+  const [rep, engagement] = await Promise.all([
+    getV8Reputation(prisma, wallet).catch((err) => {
+      console.error('[/api/screen] v8 reputation read failed', wallet, err);
+      return null;
+    }),
+    prisma.agentSaidEngagement
+      .findUnique({
+        where: { wallet },
+        select: { transferAuthorityCount: true, linkWalletCount: true, unlinkWalletCount: true },
+      })
+      .catch((err) => {
+        console.error('[/api/screen] engagement read failed', wallet, err);
+        return null;
+      }),
+  ]);
+  const integrity = assessOperatorIntegrity(engagement);
 
   const scored = !!rep?.found;
   const tier = scored ? rep!.tier : 'unranked';
@@ -87,6 +170,15 @@ export async function buildScreenResult(prisma: PrismaClient, wallet: string): P
   } else {
     verdict = 'caution';
     reason = `Low reputation (${tier}, ${score}/100, ${samples} signals). Limited or weak track record — caution advised.`;
+  }
+
+  // Operator-continuity gate. We will not vouch ("allow") for a reputation that
+  // may belong to a prior controller: if authority over the identity has
+  // transferred, soft-downgrade allow → review. Lower verdicts are already
+  // cautious, so we leave them and just attach the integrity note.
+  if (integrity.continuity === 'transferred' && verdict === 'allow') {
+    verdict = 'review';
+    reason = `Established ${tier} reputation (composite ${score}/100, ${samples} signals), BUT authority over this identity has transferred ${integrity.authorityTransfers}× — the track record may have been earned by a prior controller. Re-verify the current operator before paying.`;
   }
 
   // Per-axis breakdown — SAID's differentiator vs a flat feedback average.
@@ -115,6 +207,7 @@ export async function buildScreenResult(prisma: PrismaClient, wallet: string): P
     reason,
     axes,
     eigentrust: scored ? Number(rep!.eigentrustScore.toFixed(4)) : null,
+    integrity,
     computedAt: rep?.computedAt ?? null,
     source: SOURCE_SCORED,
   };

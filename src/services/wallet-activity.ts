@@ -184,7 +184,6 @@ async function fetchActivityAndMints(wallet: string): Promise<ActivityResult | n
         if (!addr || addr === SYSTEM_PROGRAM) continue;
         counterparties.add(addr);
       }
-
       for (const mint of findInitializedMints(tx, wallet)) {
         launchedMints.add(mint);
       }
@@ -397,6 +396,50 @@ export async function getActivityStatsForWallet(
     uniqueCounterparties: row.uniqueCounterparties,
     activeDays: row.activeDays,
   };
+}
+
+/**
+ * Light, LIVE on-chain read for ANY wallet (not just batch-scored agents) —
+ * used by the trust-screen to give a behavioral signal for wallets we hold no
+ * stored stats for. Two cheap RPC calls: recent signatures (age + activity)
+ * and SOL balance. Capped at SIG_LIMIT; returns null on an invalid address.
+ */
+export interface LiveWalletSignal {
+  txCount: number; // recent signatures seen, capped at SIG_LIMIT
+  ageDays: number | null; // days since the oldest signature in the window
+  lastActiveDays: number | null; // days since the most recent signature
+  solBalance: number;
+  exists: boolean; // any on-chain footprint at all
+}
+
+export async function getLiveWalletSignal(wallet: string): Promise<LiveWalletSignal | null> {
+  let pubkey: PublicKey;
+  try {
+    pubkey = new PublicKey(wallet);
+  } catch {
+    return null; // not a valid Solana address
+  }
+  const conn = new Connection(RPC_URL, 'confirmed');
+  try {
+    const [sigs, balanceLamports] = await Promise.all([
+      conn.getSignaturesForAddress(pubkey, { limit: SIG_LIMIT }),
+      conn.getBalance(pubkey),
+    ]);
+    const DAY = 86_400_000;
+    const now = Date.now();
+    const oldest = sigs.length ? sigs[sigs.length - 1].blockTime : null;
+    const newest = sigs.length ? sigs[0].blockTime : null;
+    return {
+      txCount: sigs.length,
+      ageDays: oldest ? (now - oldest * 1000) / DAY : null,
+      lastActiveDays: newest ? (now - newest * 1000) / DAY : null,
+      solBalance: balanceLamports / 1e9,
+      exists: sigs.length > 0 || balanceLamports > 0,
+    };
+  } catch (err) {
+    console.error(`[wallet-screen] live signal failed for ${wallet}:`, err);
+    return null;
+  }
 }
 
 export async function getLaunchedTokenStatsForWallet(
